@@ -70,6 +70,31 @@ class PatientOutreachService
         $this->logger    = new SystemLogger();
     }
 
+    /**
+     * Static factory — convenience for callers that don't already hold
+     * the Bootstrap instance. Builds a Bootstrap on the global event
+     * dispatcher (process-wide, set up by OpenEMR's kernel) so concern
+     * listeners registered at module-load time still respond.
+     *
+     * Use this from other modules that want to delegate to the central
+     * outreach service without a hard dependency on this module's
+     * construction details:
+     *
+     *   $outreach = PatientOutreachService::create();
+     *   $outreach->sweep('appt_confirmation');
+     */
+    public static function create(): self
+    {
+        global $kernel;
+        if (!$kernel) {
+            throw new \RuntimeException(
+                'PatientOutreachService::create requires OpenEMR $kernel — call from within an HTTP request lifecycle.'
+            );
+        }
+        $bootstrap = new Bootstrap($kernel->getEventDispatcher(), $kernel);
+        return new self($bootstrap);
+    }
+
     // -------------------------------------------------------------------
     // Sweep — top-level dispatcher
     // -------------------------------------------------------------------
@@ -79,9 +104,13 @@ class PatientOutreachService
      *
      * @param string|null $concernKey null = all enabled concerns
      * @param int $limitPerConcern max sends per concern (caps batch size)
+     * @param array $options per-call override bag passed to each
+     *        concern's findCandidates(). Concern-specific keys
+     *        (e.g. 'min_hours_ahead' for appt_confirmation) — concerns
+     *        that don't recognize a key ignore it.
      * @return array {sent_count, skipped_count, considered, per_concern: [...]}
      */
-    public function sweep(?string $concernKey = null, int $limitPerConcern = 50): array
+    public function sweep(?string $concernKey = null, int $limitPerConcern = 50, array $options = []): array
     {
         if (!$this->config->isEnabled()) {
             return [
@@ -115,7 +144,7 @@ class PatientOutreachService
                 continue;
             }
 
-            $result = $this->sweepConcern($concern, $limitPerConcern);
+            $result = $this->sweepConcern($concern, $limitPerConcern, $options);
             $perConcern[$key] = $result;
             $totalSent       += $result['sent_count'];
             $totalSkipped    += $result['skipped_count'];
@@ -136,7 +165,7 @@ class PatientOutreachService
      * cutting filters, dispatches, writes audit rows. Per-candidate
      * failures are isolated — one bad row doesn't kill the rest.
      */
-    private function sweepConcern(OutreachConcern $concern, int $limit): array
+    private function sweepConcern(OutreachConcern $concern, int $limit, array $options = []): array
     {
         $key = $concern->getKey();
         $sent = [];
@@ -144,7 +173,7 @@ class PatientOutreachService
         $considered = 0;
 
         try {
-            $candidates = $concern->findCandidates();
+            $candidates = $concern->findCandidates($options);
         } catch (\Throwable $e) {
             $this->logger->error("OUTREACH: findCandidates failed for $key", ['error' => $e->getMessage()]);
             return [
@@ -195,9 +224,16 @@ class PatientOutreachService
                 continue;
             }
 
-            // Build message + dispatch.
+            // Build message + dispatch. Per-call prompt override
+            // bypasses the concern's templating — useful for staff
+            // ad-hoc sends with custom wording, or when a concern's
+            // default doesn't fit the situation. The override lives
+            // on the candidate dict so it flows through sweep AND
+            // sendOne paths uniformly.
             try {
-                $messageText = $concern->buildMessage($candidate);
+                $messageText = isset($candidate['prompt_override']) && $candidate['prompt_override'] !== ''
+                    ? (string) $candidate['prompt_override']
+                    : $concern->buildMessage($candidate);
             } catch (\Throwable $e) {
                 $skipped[] = ['reason' => 'build_message_exception', 'error' => $e->getMessage()];
                 continue;
@@ -222,6 +258,151 @@ class PatientOutreachService
             'sent'          => $sent,
             'skipped'       => $skipped,
         ];
+    }
+
+    /**
+     * Dispatch one message for one specific reference, on demand.
+     *
+     * Equivalent to staff clicking "send confirmation now" on a
+     * specific appointment instead of waiting for the next sweep.
+     * Applies the same cross-cutting filters (opt-out, rate-limit,
+     * dedup) that sweep applies — sendOne is a shortcut, NOT a
+     * back door around the platform's safeguards.
+     *
+     * Overrides accepted:
+     *   - prompt_override: string — custom message text, bypasses
+     *     concern.buildMessage()
+     *   - expires_after_hours: int — overrides the concern default
+     *   - skip_dedup: bool — true to dispatch even when an unresolved
+     *     row already exists for the same (concern, reference). Use
+     *     sparingly — exposed for staff "resend" workflows.
+     *
+     * Returns the same shape as a sweep's `sent[]` / `skipped[]`
+     * entries plus a top-level success flag for convenience.
+     *
+     * @param string $concernKey
+     * @param string $referenceType
+     * @param mixed  $referenceId
+     * @param array  $overrides
+     */
+    public function sendOne(
+        string $concernKey,
+        string $referenceType,
+        $referenceId,
+        array $overrides = []
+    ): array {
+        if (!$this->config->isEnabled()) {
+            return [
+                'success' => false,
+                'error'   => 'Outreach is disabled (oe_outreach_enabled global is OFF).',
+            ];
+        }
+
+        $registry = $this->getConcernRegistry();
+        $concern  = $registry[$concernKey] ?? null;
+        if ($concern === null) {
+            return [
+                'success' => false,
+                'error'   => "No registered concern '$concernKey'",
+            ];
+        }
+        if (!$this->isConcernEnabled($concernKey)) {
+            return [
+                'success' => false,
+                'error'   => "Concern '$concernKey' is disabled in concerns_config",
+            ];
+        }
+
+        $candidate = $concern->findCandidateByReference($referenceType, $referenceId);
+        if ($candidate === null) {
+            return [
+                'success' => false,
+                'error'   => "Concern '$concernKey' has no candidate for $referenceType/$referenceId",
+                'reason'  => 'candidate_not_found',
+            ];
+        }
+
+        // Bake the overrides into the candidate dict so the dispatch
+        // path picks them up the same way it picks up sweep overrides.
+        if (isset($overrides['prompt_override']) && $overrides['prompt_override'] !== '') {
+            $candidate['prompt_override'] = (string) $overrides['prompt_override'];
+        }
+        if (isset($overrides['expires_after_hours'])) {
+            $candidate['expires_after_hours'] = (int) $overrides['expires_after_hours'];
+        }
+
+        $patientId = (int) ($candidate['patient_id'] ?? 0);
+        if ($patientId <= 0) {
+            return [
+                'success' => false,
+                'error'   => 'Concern returned a candidate without patient_id',
+                'reason'  => 'invalid_candidate',
+            ];
+        }
+        $patient = $this->getPatient($patientId);
+        if (empty($patient)) {
+            return [
+                'success' => false,
+                'error'   => "Patient $patientId not found",
+                'reason'  => 'patient_not_found',
+            ];
+        }
+
+        // Cross-cutting filters — same as sweepConcern. sendOne does
+        // NOT bypass them by default; staff needs to explicitly opt-in
+        // via `skip_dedup` for resend scenarios.
+        if ($this->isPatientOptedOut($patientId, $concernKey)) {
+            return [
+                'success' => false,
+                'error'   => 'Patient is opted out',
+                'reason'  => 'patient_opted_out',
+                'patient_id' => $patientId,
+            ];
+        }
+        if ($this->isRateLimited($patientId, $concernKey)) {
+            return [
+                'success' => false,
+                'error'   => 'Patient has hit the daily rate limit',
+                'reason'  => 'rate_limited',
+                'patient_id' => $patientId,
+            ];
+        }
+
+        $skipDedup = !empty($overrides['skip_dedup']);
+        $refType   = (string) ($candidate['reference_type'] ?? $referenceType);
+        $refId     = (int) ($candidate['reference_id'] ?? (is_numeric($referenceId) ? $referenceId : 0));
+        if (!$skipDedup && $refType && $refId
+            && $this->hasUnresolvedMessage($concernKey, $refType, $refId)) {
+            return [
+                'success' => false,
+                'error'   => "An unresolved $concernKey message already exists for $refType/$refId",
+                'reason'  => 'already_pending',
+                'patient_id' => $patientId,
+                'reference'  => "$refType/$refId",
+            ];
+        }
+
+        // Build text + dispatch via the existing path so audit row,
+        // rate-limit increment, and channel walk all happen the same
+        // way they do for sweeps.
+        try {
+            $messageText = isset($candidate['prompt_override']) && $candidate['prompt_override'] !== ''
+                ? (string) $candidate['prompt_override']
+                : $concern->buildMessage($candidate);
+        } catch (\Throwable $e) {
+            return [
+                'success' => false,
+                'error'   => 'buildMessage threw: ' . $e->getMessage(),
+                'reason'  => 'build_message_exception',
+            ];
+        }
+
+        $channelOrder = $this->resolveChannelOrder($patientId, $concernKey);
+        $result = $this->dispatchMessage(
+            $patient, $messageText, $channelOrder, $concernKey, $concern, $candidate
+        );
+        $result['success'] = !empty($result['success']);
+        return $result;
     }
 
     /**

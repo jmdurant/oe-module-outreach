@@ -96,9 +96,33 @@ interface OutreachConcern
      * The service layer applies the cross-cutting filters
      * (opt-out, rate-limit, quiet-hours).
      *
+     * The $options array is a per-call override bag passed through
+     * from PatientOutreachService::sweep(). Concerns interpret keys
+     * relevant to their domain (e.g. appt_confirmation honors
+     * 'min_hours_ahead'/'max_hours_ahead'); irrelevant keys are
+     * ignored. Implementations MUST accept any options array without
+     * erroring even when they care about none of the keys.
+     *
      * @return iterable<int, array{patient_id:int, reference_type?:string, reference_id?:int, meta?:array}>
      */
-    public function findCandidates(): iterable;
+    public function findCandidates(array $options = []): iterable;
+
+    /**
+     * Resolve ONE specific candidate by its reference tuple. Used by
+     * PatientOutreachService::sendOne() to dispatch a single message
+     * on demand (e.g. staff manually triggers a confirmation send for
+     * a specific appointment) without running a sweep.
+     *
+     * Returns the same candidate-dict shape findCandidates() yields,
+     * or null if the reference doesn't resolve (appointment cancelled,
+     * patient deleted, etc). Concerns SHOULD apply the same domain
+     * filters they apply in findCandidates — sendOne shouldn't be a
+     * back door around them.
+     *
+     * @param string $referenceType e.g. 'appointment'
+     * @param mixed  $referenceId   the concern-specific id
+     */
+    public function findCandidateByReference(string $referenceType, $referenceId): ?array;
 
     /**
      * Build the prompt text for a single candidate. Receives the

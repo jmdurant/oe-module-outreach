@@ -82,8 +82,45 @@ class OutreachController
             ? (string) $body['concern_key']
             : null;
         $limit = isset($body['limit']) ? max(1, (int) $body['limit']) : 50;
+        $options = isset($body['options']) && is_array($body['options']) ? $body['options'] : [];
 
-        return $this->service->sweep($concernKey, $limit);
+        return $this->service->sweep($concernKey, $limit, $options);
+    }
+
+    // -------------------------------------------------------------------
+    // POST /fhir/Outreach/send-one
+    // -------------------------------------------------------------------
+
+    /**
+     * Dispatch a single message for a specific (concern, reference)
+     * tuple — staff "send confirmation now" path. Applies the same
+     * opt-out / rate-limit / dedup checks as a sweep.
+     *
+     * Body: {concern_key, reference_type, reference_id,
+     *        prompt_override?, expires_after_hours?, skip_dedup?}
+     */
+    public function sendOne(HttpRestRequest $request): array
+    {
+        $body = $this->readJsonBody();
+        $concernKey   = trim((string) ($body['concern_key']   ?? ''));
+        $referenceType = trim((string) ($body['reference_type'] ?? ''));
+        $referenceId  = $body['reference_id'] ?? null;
+        if ($concernKey === '' || $referenceType === '' || $referenceId === null || $referenceId === '') {
+            return $this->error('concern_key, reference_type, and reference_id are required', 400);
+        }
+
+        $overrides = [];
+        if (isset($body['prompt_override'])) {
+            $overrides['prompt_override'] = (string) $body['prompt_override'];
+        }
+        if (isset($body['expires_after_hours'])) {
+            $overrides['expires_after_hours'] = (int) $body['expires_after_hours'];
+        }
+        if (isset($body['skip_dedup'])) {
+            $overrides['skip_dedup'] = (bool) $body['skip_dedup'];
+        }
+
+        return $this->service->sendOne($concernKey, $referenceType, $referenceId, $overrides);
     }
 
     // -------------------------------------------------------------------
