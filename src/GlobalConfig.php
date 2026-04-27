@@ -33,9 +33,17 @@ class GlobalConfig
     /** @var array */
     private $globalsArray;
 
-    public function __construct(array &$globalsArray)
+    /**
+     * Accept $GLOBALS by VALUE (not reference). PHP 8.1+ refuses to
+     * pass $GLOBALS by reference at the call site, which broke every
+     * module-load when this constructor used `array &$globalsArray`.
+     * The settings are read-only from this class anyway — we never
+     * mutate the array — so a value copy is correct semantically and
+     * works across all PHP versions OpenEMR supports.
+     */
+    public function __construct(array $globalsArray)
     {
-        $this->globalsArray = &$globalsArray;
+        $this->globalsArray = $globalsArray;
     }
 
     /**
