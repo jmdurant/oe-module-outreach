@@ -13,11 +13,20 @@
  * roll the FCM key without touching this code.
  *
  * Context fields the dispatcher honors:
- *   - context.event_type  (string) override for payload.event_type
- *   - context.deep_link   (string) URL to open in the app on tap
- *   - context.priority    ('normal'|'high') Firebase priority hint
- *   - context.webhook_url (string) override for the practice's
- *                         configured FIREBASE_OUTREACH_WEBHOOK
+ *   - context.event_type   (string) override for payload.event_type
+ *   - context.deep_link    (string) URL to open in the app on tap
+ *   - context.priority     ('normal'|'high') Firebase priority hint
+ *   - context.webhook_url  (string) override for the practice's
+ *                          configured FIREBASE_OUTREACH_WEBHOOK
+ *   - context.push_payload (array) full payload override — when
+ *                          provided, replaces the dispatcher's
+ *                          generic shape and ships verbatim. Useful
+ *                          for concerns that need to mirror an
+ *                          existing Firebase function's input
+ *                          contract (e.g. unpaid_statement_reminder
+ *                          mirroring the legacy paymentBalances shape).
+ *                          patient_id / patient_uuid are auto-merged
+ *                          if not in the override.
  *
  * @package OpenEMR\Modules\Outreach\Services\Channels
  */
@@ -69,17 +78,29 @@ class PushChannelDispatcher implements OutreachChannelDispatcher
             return ['success' => false, 'error' => 'No patient UUID available for push routing'];
         }
 
-        $payload = [
-            'event_type' => (string) ($context['event_type'] ?? 'patient_outreach'),
-            'patient_id' => (int) ($patient['pid'] ?? 0),
-            'patient_uuid' => $patientUuidString,
-            'patient_name' => trim(($patient['fname'] ?? '') . ' ' . ($patient['lname'] ?? '')),
-            'message' => $messageText,
-            'priority' => (string) ($context['priority'] ?? 'normal'),
-            'deep_link' => (string) ($context['deep_link'] ?? ''),
-            'meta' => $context,
-            'timestamp' => date('c'),
-        ];
+        // Concern-supplied push_payload wins — concerns that need to
+        // mirror an existing Firebase function's input contract pass
+        // a full payload via candidate.meta.push_payload. We merge in
+        // the patient routing fields if they're not already there and
+        // ship verbatim. Otherwise fall back to the generic shape.
+        if (!empty($context['push_payload']) && is_array($context['push_payload'])) {
+            $payload = $context['push_payload'];
+            $payload['patient_id']   = $payload['patient_id']   ?? (int) ($patient['pid'] ?? 0);
+            $payload['patient_uuid'] = $payload['patient_uuid'] ?? $patientUuidString;
+            $payload['timestamp']    = $payload['timestamp']    ?? date('c');
+        } else {
+            $payload = [
+                'event_type' => (string) ($context['event_type'] ?? 'patient_outreach'),
+                'patient_id' => (int) ($patient['pid'] ?? 0),
+                'patient_uuid' => $patientUuidString,
+                'patient_name' => trim(($patient['fname'] ?? '') . ' ' . ($patient['lname'] ?? '')),
+                'message' => $messageText,
+                'priority' => (string) ($context['priority'] ?? 'normal'),
+                'deep_link' => (string) ($context['deep_link'] ?? ''),
+                'meta' => $context,
+                'timestamp' => date('c'),
+            ];
+        }
 
         $secret = (string) (getenv('FIREBASE_WEBHOOK_SECRET') ?: '');
         $headers = ['Content-Type: application/json'];
