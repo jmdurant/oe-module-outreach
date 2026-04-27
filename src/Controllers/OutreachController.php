@@ -97,7 +97,14 @@ class OutreachController
      * opt-out / rate-limit / dedup checks as a sweep.
      *
      * Body: {concern_key, reference_type, reference_id,
-     *        prompt_override?, expires_after_hours?, skip_dedup?}
+     *        prompt_override?, expires_after_hours?, skip_dedup?,
+     *        meta?: {...}}
+     *
+     * `meta` is an arbitrary dict of concern-specific context that
+     * gets merged into candidate.meta after findCandidateByReference
+     * returns — see PatientOutreachService::sendOne for details.
+     * AppointmentCancellationConcern uses this to pass
+     * cancellation_subtype + refund context.
      */
     public function sendOne(HttpRestRequest $request): array
     {
@@ -118,6 +125,9 @@ class OutreachController
         }
         if (isset($body['skip_dedup'])) {
             $overrides['skip_dedup'] = (bool) $body['skip_dedup'];
+        }
+        if (isset($body['meta']) && is_array($body['meta'])) {
+            $overrides['meta'] = $body['meta'];
         }
 
         return $this->service->sendOne($concernKey, $referenceType, $referenceId, $overrides);
