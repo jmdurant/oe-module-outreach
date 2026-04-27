@@ -210,16 +210,22 @@ class PatientOutreachService
                 continue;
             }
 
-            // Dedup: skip if there's already an unresolved message for the
-            // same (concern_type, reference). Concerns should ideally
-            // pre-filter, but the service-layer check is the safety net.
+            // Dedup: skip if there's already an unresolved message for
+            // the same (concern_type, concern_subtype, reference).
+            // Concerns should ideally pre-filter, but the service-layer
+            // check is the safety net. concern_subtype is the
+            // distinguishing slot for cadence concerns — appointment
+            // reminders at 7d/3d/1d/0d are 4 separate sends per
+            // appointment, each tracked independently via subtype.
             $refType = $candidate['reference_type'] ?? null;
             $refId   = isset($candidate['reference_id']) ? (int) $candidate['reference_id'] : null;
-            if ($refType && $refId && $this->hasUnresolvedMessage($key, $refType, $refId)) {
+            $subtype = $candidate['concern_subtype'] ?? null;
+            if ($refType && $refId && $this->hasUnresolvedMessage($key, $refType, $refId, $subtype)) {
                 $skipped[] = [
                     'reason' => 'already_pending',
                     'patient_id' => $patientId,
                     'reference' => "$refType/$refId",
+                    'concern_subtype' => $subtype,
                 ];
                 continue;
             }
@@ -371,8 +377,9 @@ class PatientOutreachService
         $skipDedup = !empty($overrides['skip_dedup']);
         $refType   = (string) ($candidate['reference_type'] ?? $referenceType);
         $refId     = (int) ($candidate['reference_id'] ?? (is_numeric($referenceId) ? $referenceId : 0));
+        $subtype   = $candidate['concern_subtype'] ?? null;
         if (!$skipDedup && $refType && $refId
-            && $this->hasUnresolvedMessage($concernKey, $refType, $refId)) {
+            && $this->hasUnresolvedMessage($concernKey, $refType, $refId, $subtype)) {
             return [
                 'success' => false,
                 'error'   => "An unresolved $concernKey message already exists for $refType/$refId",
@@ -793,16 +800,35 @@ class PatientOutreachService
         );
     }
 
-    private function hasUnresolvedMessage(string $concernKey, string $refType, int $refId): bool
+    /**
+     * Optionally narrow the dedup by concern_subtype. Cadence concerns
+     * (e.g. appointment_reminder at 7d/3d/1d/0d) emit multiple sends
+     * per reference and need each subtype tracked independently — when
+     * subtype is provided, this method matches WITH it; when null, it
+     * matches subtype-agnostic (the original behavior).
+     */
+    private function hasUnresolvedMessage(string $concernKey, string $refType, int $refId, ?string $subtype = null): bool
     {
-        $row = sqlQuery(
-            "SELECT id FROM " . self::TABLE_MESSAGES . "
-              WHERE concern_type = ? AND reference_type = ? AND reference_id = ?
-                AND resolution IS NULL
-                AND dispatch_status IN ('sent','dry_run','pending')
-              LIMIT 1",
-            [$concernKey, $refType, $refId]
-        );
+        if ($subtype !== null && $subtype !== '') {
+            $row = sqlQuery(
+                "SELECT id FROM " . self::TABLE_MESSAGES . "
+                  WHERE concern_type = ? AND reference_type = ? AND reference_id = ?
+                    AND concern_subtype = ?
+                    AND resolution IS NULL
+                    AND dispatch_status IN ('sent','dry_run','pending')
+                  LIMIT 1",
+                [$concernKey, $refType, $refId, $subtype]
+            );
+        } else {
+            $row = sqlQuery(
+                "SELECT id FROM " . self::TABLE_MESSAGES . "
+                  WHERE concern_type = ? AND reference_type = ? AND reference_id = ?
+                    AND resolution IS NULL
+                    AND dispatch_status IN ('sent','dry_run','pending')
+                  LIMIT 1",
+                [$concernKey, $refType, $refId]
+            );
+        }
         return !empty($row);
     }
 
