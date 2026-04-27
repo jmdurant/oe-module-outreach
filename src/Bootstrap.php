@@ -90,64 +90,73 @@ class Bootstrap
     }
 
     /**
-     * Insert a "Patient Outreach" top-level dropdown into the OpenEMR
-     * navbar with five operational pages:
+     * Append outreach pages as children of the existing "Modules"
+     * dropdown (menu_id=modimg). Six entries — separator, then the
+     * four operational pages, then a deep link to the Globals
+     * settings section.
      *
-     *   - Messages          → audit table over module_outreach_messages
-     *   - Concerns          → enable/disable + per-concern config
-     *   - Patient Prefs     → per-patient opt-out + channel preference
-     *   - Run / Expire      → manual sweep + expire-pending triggers
-     *   - Settings          → deep link to Admin > Globals > Notifications
-     *
-     * Inserted after the modimg pivot (same convention oe-module-faxsms
-     * uses) so it lands in a predictable spot regardless of which other
-     * modules are installed.
+     * Wrapped in a try/catch so a listener error here can't break
+     * the whole navbar render (which historically presents as a
+     * silent session-expired logout in OpenEMR).
      */
     public function injectOutreachMenu(MenuEvent $event): MenuEvent
     {
-        $base = self::MODULE_INSTALLATION_PATH . self::MODULE_NAME . '/public';
+        try {
+            $base = self::MODULE_INSTALLATION_PATH . self::MODULE_NAME . '/public';
 
-        $build = function (string $target, string $menuId, string $label, string $url, array $aclReq, array $children = []) {
-            $item = new \stdClass();
-            $item->requirement = 0;
-            $item->target      = $target;
-            $item->menu_id     = $menuId;
-            $item->label       = xlt($label);
-            $item->url         = $url;
-            $item->children    = $children;
-            $item->acl_req     = $aclReq;
-            return $item;
-        };
+            $build = function (string $menuId, string $label, string $url, array $aclReq, array $children = []) {
+                $item = new \stdClass();
+                $item->requirement = 0;
+                $item->target      = 'outreach';
+                $item->menu_id     = $menuId;
+                $item->label       = xlt($label);
+                $item->url         = $url;
+                $item->children    = $children;
+                $item->acl_req     = $aclReq;
+                return $item;
+            };
 
-        $messages    = $build('outreach', 'outreach_msgs',     'Messages',           "$base/messages.php",       ['admin', 'super']);
-        $concerns    = $build('outreach', 'outreach_concerns', 'Concerns',           "$base/concerns.php",       ['admin', 'super']);
-        $prefs       = $build('outreach', 'outreach_prefs',    'Patient Preferences', "$base/patient_prefs.php", ['admin', 'super']);
-        $actions     = $build('outreach', 'outreach_actions',  'Run / Expire',       "$base/actions.php",        ['admin', 'super']);
-        $settings    = $build('outreach', 'outreach_settings', 'Settings (Globals)', '/interface/super/edit_globals.php?category=Notifications', ['admin', 'super']);
+            $aclReq = ['admin', 'super'];
+            $children = [
+                $build('outreach_msgs',     'Outreach: Messages',            "$base/messages.php",       $aclReq),
+                $build('outreach_concerns', 'Outreach: Concerns',            "$base/concerns.php",       $aclReq),
+                $build('outreach_prefs',    'Outreach: Patient Preferences', "$base/patient_prefs.php",  $aclReq),
+                $build('outreach_actions',  'Outreach: Run / Expire',        "$base/actions.php",        $aclReq),
+                $build('outreach_settings', 'Outreach: Settings (Globals)',  '/interface/super/edit_globals.php?category=Notifications', $aclReq),
+            ];
 
-        $top = $build(
-            'outreach',
-            'outreach_top',
-            'Patient Outreach',
-            '#',
-            ['admin', 'super'],
-            [$messages, $concerns, $prefs, $actions, $settings]
-        );
-
-        $menu = $event->getMenu();
-        $out  = [];
-        $inserted = false;
-        foreach ($menu as $item) {
-            $out[] = $item;
-            if (!$inserted && isset($item->menu_id) && $item->menu_id === 'modimg') {
-                $out[] = $top;
-                $inserted = true;
+            $menu = $event->getMenu();
+            $appended = false;
+            foreach ($menu as $item) {
+                if (isset($item->menu_id) && $item->menu_id === 'modimg') {
+                    if (!is_array($item->children)) {
+                        $item->children = [];
+                    }
+                    foreach ($children as $c) {
+                        $item->children[] = $c;
+                    }
+                    $appended = true;
+                    break;
+                }
             }
+
+            // If for some reason this site has no Modules dropdown,
+            // skip silently rather than fabricate a parent — better
+            // a missing menu than a broken navbar.
+            if (!$appended) {
+                $this->logger->debug('OUTREACH: Modules (modimg) menu item not found; skipping menu injection.');
+            }
+
+            $event->setMenu($menu);
+        } catch (\Throwable $e) {
+            // The navbar render is downstream of every page in OpenEMR
+            // — a thrown exception here can present as a silent logout.
+            // Swallow + log so the rest of the navbar still renders.
+            $this->logger->error('OUTREACH: menu injection failed', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
         }
-        if (!$inserted) {
-            $out[] = $top;
-        }
-        $event->setMenu($out);
         return $event;
     }
 
