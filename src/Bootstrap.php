@@ -26,11 +26,13 @@
 
 namespace OpenEMR\Modules\Outreach;
 
+use OpenEMR\Common\Http\HttpRestRequest;
 use OpenEMR\Common\Logging\SystemLogger;
 use OpenEMR\Core\Kernel;
 use OpenEMR\Events\Globals\GlobalsInitializedEvent;
 use OpenEMR\Events\RestApiExtend\RestApiCreateEvent;
 use OpenEMR\Events\RestApiExtend\RestApiScopeEvent;
+use OpenEMR\Modules\Outreach\Controllers\OutreachController;
 use OpenEMR\Modules\Outreach\Events\OutreachConcernRegistryEvent;
 use OpenEMR\Services\Globals\GlobalSetting;
 use Symfony\Component\EventDispatcher\EventDispatcherInterface;
@@ -126,16 +128,37 @@ class Bootstrap
 
     public function registerOutreachRoutes(RestApiCreateEvent $event): RestApiCreateEvent
     {
-        // Route handlers wired in Task #16. This Bootstrap intentionally
-        // registers an empty route set on first scaffold so the module
-        // loads cleanly before the full surface lands. Endpoints landing
-        // when controllers exist:
-        //   GET  /fhir/Outreach/concerns
-        //   POST /fhir/Outreach/sweep
-        //   GET  /fhir/Outreach/messages
-        //   GET  /fhir/Outreach/lookup-by-phone
-        //   GET  /fhir/Outreach/preferences/:patient_uuid
-        //   PUT  /fhir/Outreach/preferences/:patient_uuid
+        // Capture Bootstrap + logger for closures — the Bootstrap is
+        // what PatientOutreachService needs to dispatch the lazy
+        // concern-registry event, so the controller takes it via DI.
+        $bootstrap = $this;
+        $logger    = $this->logger;
+
+        $wrap = function (string $method) use ($bootstrap, $logger) {
+            return function (HttpRestRequest $request) use ($bootstrap, $logger, $method) {
+                try {
+                    $controller = new OutreachController($bootstrap);
+                    return $controller->$method($request);
+                } catch (\Throwable $e) {
+                    $logger->error("OUTREACH: $method failed", [
+                        'error' => $e->getMessage(),
+                        'trace' => $e->getTraceAsString(),
+                    ]);
+                    http_response_code(500);
+                    return ['success' => false, 'error' => $e->getMessage()];
+                }
+            };
+        };
+
+        $event->addToFHIRRouteMap("GET /fhir/Outreach/concerns",         $wrap('listConcerns'));
+        $event->addToFHIRRouteMap("POST /fhir/Outreach/sweep",           $wrap('sweep'));
+        $event->addToFHIRRouteMap("POST /fhir/Outreach/expire-pending",  $wrap('expirePending'));
+        $event->addToFHIRRouteMap("GET /fhir/Outreach/messages",         $wrap('listMessages'));
+        $event->addToFHIRRouteMap("GET /fhir/Outreach/lookup-by-phone",  $wrap('lookupByPhone'));
+        $event->addToFHIRRouteMap("POST /fhir/Outreach/reply",           $wrap('reply'));
+        $event->addToFHIRRouteMap("GET /fhir/Outreach/preferences",      $wrap('getPreferences'));
+        $event->addToFHIRRouteMap("PUT /fhir/Outreach/preferences",      $wrap('setPreferences'));
+
         return $event;
     }
 
