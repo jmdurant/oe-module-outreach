@@ -11,6 +11,15 @@
  * oe-module-doximity AppDispatch patch). When that config changes,
  * this dispatcher follows automatically — no module change needed.
  *
+ * Context fields the dispatcher honors:
+ *   - context.sms_body  (string) optional SMS-specific short text;
+ *                       falls back to $messageText when absent.
+ *                       Useful when the canonical message body
+ *                       (used by other channels) is too long or
+ *                       too rich for SMS — e.g. prepayment requests
+ *                       where the email is rich HTML and the SMS
+ *                       is "Practice: $X due. Pay: <link>".
+ *
  * @package OpenEMR\Modules\Outreach\Services\Channels
  */
 
@@ -72,7 +81,15 @@ class SmsChannelDispatcher implements OutreachChannelDispatcher
             // Provider clients return a string. Doximity-style: message id
             // on success, "Error: ..." on failure. Other providers follow
             // similar conventions.
-            $result = (string) $client->sendSMS($phone, '', $messageText);
+            //
+            // Concerns may pass an SMS-specific short body via
+            // context.sms_body (e.g. prepayment_request needs the SMS
+            // to be a one-liner with the payment link, not the full
+            // rich text used for email). Falls back to $messageText
+            // — the canonical body buildMessage() returns — when
+            // sms_body isn't provided.
+            $body = (string) ($context['sms_body'] ?? $messageText);
+            $result = (string) $client->sendSMS($phone, '', $body);
             $isError = stripos($result, 'error') === 0;
             if ($isError) {
                 return ['success' => false, 'error' => $result, 'raw' => $result];
