@@ -32,6 +32,7 @@ use OpenEMR\Core\Kernel;
 use OpenEMR\Events\Globals\GlobalsInitializedEvent;
 use OpenEMR\Events\RestApiExtend\RestApiCreateEvent;
 use OpenEMR\Events\RestApiExtend\RestApiScopeEvent;
+use OpenEMR\Menu\MenuEvent;
 use OpenEMR\Modules\Outreach\Controllers\OutreachController;
 use OpenEMR\Modules\Outreach\Events\OutreachConcernRegistryEvent;
 use OpenEMR\Services\Globals\GlobalSetting;
@@ -73,6 +74,81 @@ class Bootstrap
     {
         $this->addGlobalSettings();
         $this->addRestRoutes();
+        $this->addMenuItems();
+    }
+
+    // -------------------------------------------------------------------
+    // Top-level menu (Modules > Patient Outreach)
+    // -------------------------------------------------------------------
+
+    public function addMenuItems(): void
+    {
+        $this->eventDispatcher->addListener(
+            MenuEvent::MENU_UPDATE,
+            [$this, 'injectOutreachMenu']
+        );
+    }
+
+    /**
+     * Insert a "Patient Outreach" top-level dropdown into the OpenEMR
+     * navbar with five operational pages:
+     *
+     *   - Messages          → audit table over module_outreach_messages
+     *   - Concerns          → enable/disable + per-concern config
+     *   - Patient Prefs     → per-patient opt-out + channel preference
+     *   - Run / Expire      → manual sweep + expire-pending triggers
+     *   - Settings          → deep link to Admin > Globals > Notifications
+     *
+     * Inserted after the modimg pivot (same convention oe-module-faxsms
+     * uses) so it lands in a predictable spot regardless of which other
+     * modules are installed.
+     */
+    public function injectOutreachMenu(MenuEvent $event): MenuEvent
+    {
+        $base = self::MODULE_INSTALLATION_PATH . self::MODULE_NAME . '/public';
+
+        $build = function (string $target, string $menuId, string $label, string $url, array $aclReq, array $children = []) {
+            $item = new \stdClass();
+            $item->requirement = 0;
+            $item->target      = $target;
+            $item->menu_id     = $menuId;
+            $item->label       = xlt($label);
+            $item->url         = $url;
+            $item->children    = $children;
+            $item->acl_req     = $aclReq;
+            return $item;
+        };
+
+        $messages    = $build('outreach', 'outreach_msgs',     'Messages',           "$base/messages.php",       ['admin', 'super']);
+        $concerns    = $build('outreach', 'outreach_concerns', 'Concerns',           "$base/concerns.php",       ['admin', 'super']);
+        $prefs       = $build('outreach', 'outreach_prefs',    'Patient Preferences', "$base/patient_prefs.php", ['admin', 'super']);
+        $actions     = $build('outreach', 'outreach_actions',  'Run / Expire',       "$base/actions.php",        ['admin', 'super']);
+        $settings    = $build('outreach', 'outreach_settings', 'Settings (Globals)', '/interface/super/edit_globals.php?category=Notifications', ['admin', 'super']);
+
+        $top = $build(
+            'outreach',
+            'outreach_top',
+            'Patient Outreach',
+            '#',
+            ['admin', 'super'],
+            [$messages, $concerns, $prefs, $actions, $settings]
+        );
+
+        $menu = $event->getMenu();
+        $out  = [];
+        $inserted = false;
+        foreach ($menu as $item) {
+            $out[] = $item;
+            if (!$inserted && isset($item->menu_id) && $item->menu_id === 'modimg') {
+                $out[] = $top;
+                $inserted = true;
+            }
+        }
+        if (!$inserted) {
+            $out[] = $top;
+        }
+        $event->setMenu($out);
+        return $event;
     }
 
     // -------------------------------------------------------------------
