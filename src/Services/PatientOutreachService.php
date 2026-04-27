@@ -337,6 +337,16 @@ class PatientOutreachService
             $candidate['expires_after_hours'] = (int) $overrides['expires_after_hours'];
         }
 
+        // Caller-provided concern-specific context. Merged into
+        // candidate.meta so the concern's buildMessage / candidateFromRow
+        // sees the keys (e.g. AppointmentCancellationConcern reads
+        // meta.cancellation_subtype, meta.refund_amount, etc. from
+        // here). Caller wins on key collision — that's the whole
+        // point of the override.
+        if (isset($overrides['meta']) && is_array($overrides['meta'])) {
+            $candidate['meta'] = array_merge($candidate['meta'] ?? [], $overrides['meta']);
+        }
+
         $patientId = (int) ($candidate['patient_id'] ?? 0);
         if ($patientId <= 0) {
             return [
