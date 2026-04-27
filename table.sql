@@ -1,0 +1,57 @@
+-- Patient Outreach Platform — schema reference.
+-- Tables are created programmatically in ModuleManagerListener::setupDatabase().
+-- This file documents the schema for human readers + tooling that scrapes
+-- table.sql to generate ER diagrams. The authoritative DDL is the PHP code.
+
+-- ============================================================================
+-- module_outreach_messages
+-- One row per dispatched message. The audit trail.
+-- ============================================================================
+-- CREATE TABLE module_outreach_messages (
+--   id, uuid,
+--   concern_type, concern_subtype,
+--   patient_id, patient_uuid, patient_phone, patient_email,
+--   reference_type, reference_id,             -- e.g. ('appointment', 12345)
+--   channel,                                   -- sms | email | push | none
+--   prompt_text, meta (JSON),
+--   expected_response_kind,                    -- y_n | free_text | no_reply
+--   dispatch_status,                           -- pending|sent|failed|skipped|dry_run
+--   dispatch_result, sent_at, expires_at,
+--   resolved_at, resolution, resolution_reply,
+--   created_at, updated_at
+-- );
+
+-- ============================================================================
+-- module_outreach_concerns_config
+-- Per-concern practice overrides. NULL columns mean "use code default."
+-- ============================================================================
+-- CREATE TABLE module_outreach_concerns_config (
+--   id, concern_type (UNIQUE),
+--   enabled,
+--   timing_window_min_hours, timing_window_max_hours,
+--   channel_preference, rate_limit_per_period, rate_limit_period_hours,
+--   prompt_template, expires_after_hours,
+--   meta (JSON), updated_at, updated_by_user_id
+-- );
+
+-- ============================================================================
+-- module_outreach_patient_prefs
+-- Per-patient opt-out + channel preferences. Honors HIPAA "STOP" replies.
+-- ============================================================================
+-- CREATE TABLE module_outreach_patient_prefs (
+--   id, patient_id (UNIQUE), patient_uuid,
+--   master_opt_out, channel_preference, concern_opt_outs (JSON),
+--   quiet_hours_start, quiet_hours_end, notes,
+--   master_opt_out_at, master_opt_out_reason, updated_at
+-- );
+
+-- ============================================================================
+-- module_outreach_rate_limits
+-- Cached daily counters for fast dispatch-time rate-limit checks.
+-- Authoritative source is module_outreach_messages.
+-- ============================================================================
+-- CREATE TABLE module_outreach_rate_limits (
+--   id, patient_id, bucket_date, concern_type,
+--   count, updated_at,
+--   UNIQUE KEY (patient_id, bucket_date, concern_type)
+-- );

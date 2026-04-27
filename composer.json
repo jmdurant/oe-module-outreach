@@ -1,0 +1,32 @@
+{
+  "name": "jmdurant/oe-module-outreach",
+  "description": "Patient outreach platform — multi-channel (SMS/email/push) reminder, confirmation, and notification dispatch with central tracking, rate-limit, opt-out, and audit. Concerns from other modules (appointment confirmation, post-visit superbill, balance reminders, questionnaire reminders, etc.) plug in via an OutreachConcernRegistryEvent fired at boot.",
+  "type": "openemr-module",
+  "license": "GPL-3.0",
+  "authors": [
+    {
+      "name": "James DuRant, MD",
+      "role": "Maintainer"
+    }
+  ],
+  "keywords": ["openemr", "openemr-module", "outreach", "patient-engagement", "sms", "notifications"],
+  "minimum-stability": "stable",
+  "autoload": {
+    "psr-4": {
+      "OpenEMR\\Modules\\Outreach\\": "src/"
+    }
+  },
+  "require": {
+    "openemr/oe-module-installer-plugin": "^0.1.0",
+    "php": ">= 7.4",
+    "symfony/event-dispatcher": "^6.4.13"
+  },
+  "conflict": {
+    "openemr/openemr": "<7.0.0"
+  },
+  "config": {
+    "allow-plugins": {
+      "openemr/oe-module-installer-plugin": true
+    }
+  }
+}
