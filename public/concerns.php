@@ -16,6 +16,7 @@ require_once __DIR__ . '/../../../../globals.php';
 
 use OpenEMR\Common\Acl\AclMain;
 use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Session\SessionWrapperFactory;
 use OpenEMR\Modules\Outreach\Services\PatientOutreachService;
 
 if (!AclMain::aclCheckCore('admin', 'super')) {
@@ -29,7 +30,8 @@ $flash = '';
 // POST: upsert per-concern config
 // ---------------------------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if (!CsrfUtils::verifyCsrfToken($_POST['csrf_token_form'] ?? '')) {
+    $_csrfSession = SessionWrapperFactory::getInstance()->getActiveSession();
+    if (!CsrfUtils::verifyCsrfToken($_POST['csrf_token_form'] ?? '', $_csrfSession)) {
         CsrfUtils::csrfNotVerified();
     }
     $concern_type           = trim((string) ($_POST['concern_type'] ?? ''));
@@ -105,7 +107,8 @@ $outreach_active_tab = 'concerns';
 $outreach_page_title = 'Outreach Concerns';
 require __DIR__ . '/_chrome.php';
 
-$csrf = CsrfUtils::collectCsrfToken();
+$_csrfSession = SessionWrapperFactory::getInstance()->getActiveSession();
+$csrf = CsrfUtils::collectCsrfToken($_csrfSession);
 ?>
 
 <div class="container-fluid mt-3">
