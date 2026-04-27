@@ -118,11 +118,10 @@ class Bootstrap
 
             $aclReq = ['admin', 'super'];
             $children = [
-                $build('outreach_msgs',     'Outreach: Messages',            "$base/messages.php",       $aclReq),
-                $build('outreach_concerns', 'Outreach: Concerns',            "$base/concerns.php",       $aclReq),
-                $build('outreach_prefs',    'Outreach: Patient Preferences', "$base/patient_prefs.php",  $aclReq),
-                $build('outreach_actions',  'Outreach: Run / Expire',        "$base/actions.php",        $aclReq),
-                $build('outreach_settings', 'Outreach: Settings (Globals)',  '/interface/super/edit_globals.php?category=Notifications', $aclReq),
+                $build('outreach_msgs',     'Outreach: Messages',            "$base/messages.php",      $aclReq),
+                $build('outreach_concerns', 'Outreach: Concerns',            "$base/concerns.php",      $aclReq),
+                $build('outreach_prefs',    'Outreach: Patient Preferences', "$base/patient_prefs.php", $aclReq),
+                $build('outreach_actions',  'Outreach: Run / Expire',        "$base/actions.php",       $aclReq),
             ];
 
             $menu = $event->getMenu();
