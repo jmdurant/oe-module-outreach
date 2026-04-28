@@ -505,14 +505,25 @@ class PatientOutreachService
         $sentAt  = in_array($dispatchStatus, ['sent', 'dry_run'], true) ? date('Y-m-d H:i:s') : null;
         $meta    = json_encode($candidate['meta'] ?? new \stdClass(), JSON_UNESCAPED_SLASHES);
 
+        // Capture the provider's stable per-thread id when the
+        // channel dispatcher exposes one. Doximity returns its
+        // PatientMessageThread/<uuid> as the sendSMS result, which
+        // inbound replies carry too — strictly stronger join key
+        // than phone for inbound correlation. Falls back to NULL
+        // when the channel is email / push or the SMS provider
+        // doesn't expose a thread id.
+        $threadId = isset($resultRaw['thread_id']) && $resultRaw['thread_id'] !== ''
+            ? substr((string) $resultRaw['thread_id'], 0, 128)
+            : null;
+
         sqlStatement(
             "INSERT INTO " . self::TABLE_MESSAGES . " (
                 uuid, concern_type, concern_subtype,
                 patient_id, patient_uuid, patient_phone, patient_email,
                 reference_type, reference_id,
-                channel, prompt_text, meta, expected_response_kind,
+                channel, external_thread_id, prompt_text, meta, expected_response_kind,
                 dispatch_status, dispatch_result, sent_at, expires_at
-             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [
                 $uuid, $concernKey,
                 $candidate['concern_subtype'] ?? null,
@@ -520,7 +531,7 @@ class PatientOutreachService
                 $patient['phone_cell'] ?: ($patient['phone_home'] ?? null),
                 $patient['email'] ?? null,
                 $refType, $refId,
-                $channel, $messageText, $meta, $concern->expectedResponseKind(),
+                $channel, $threadId, $messageText, $meta, $concern->expectedResponseKind(),
                 $dispatchStatus, $dispatchResult, $sentAt, $expiresAt,
             ]
         );
@@ -537,6 +548,7 @@ class PatientOutreachService
             'concern_type' => $concernKey,
             'patient_id' => (int) $patient['pid'],
             'channel' => $channel,
+            'external_thread_id' => $threadId,
             'dispatch_status' => $dispatchStatus,
             'sent_at' => $sentAt,
             'expires_at' => $expiresAt,
@@ -550,38 +562,71 @@ class PatientOutreachService
     // -------------------------------------------------------------------
 
     /**
-     * Find the most-recent pending message for a phone number. Used by
-     * the GV-side triage layer when an inbound Y/N reply needs to map
-     * back to (concern, patient, reference). Returns null if no match.
+     * Find the most-recent pending message for a phone number, with
+     * optional thread-id correlation. Used by the GV-side triage
+     * layer when an inbound Y/N reply needs to map back to (concern,
+     * patient, reference).
+     *
+     * Lookup priority:
+     *   1. external_thread_id exact match — when the SMS provider
+     *      exposes a stable per-thread id and the inbound reply
+     *      carries it, this is unambiguous (1:1). Doximity does this:
+     *      PatientMessageThread/<uuid> on outbound is the same key
+     *      inbound replies use.
+     *   2. patient_phone exact match — the legacy fallback. Works
+     *      for the typical case where a patient has at most one
+     *      open Y/N prompt at a time.
+     *   3. Digits-only phone match — accommodates format variants
+     *      across patient_data.
+     *
+     * Returns null on no match.
      */
-    public function lookupByPhone(string $patientPhone): ?array
+    public function lookupByPhone(string $patientPhone, ?string $threadId = null): ?array
     {
-        if (trim($patientPhone) === '') {
+        $threadId = $threadId !== null && trim($threadId) !== '' ? trim($threadId) : null;
+        if ($threadId === null && trim($patientPhone) === '') {
             return null;
         }
 
-        $row = sqlQuery(
-            "SELECT id, uuid, concern_type, patient_id, patient_uuid,
-                    patient_phone, reference_type, reference_id,
-                    sent_at, expires_at, prompt_text, expected_response_kind
-               FROM " . self::TABLE_MESSAGES . "
-              WHERE patient_phone = ? AND resolution IS NULL
-                AND dispatch_status IN ('sent','dry_run')
-                AND (expires_at IS NULL OR expires_at > NOW())
-           ORDER BY sent_at DESC LIMIT 1",
-            [$patientPhone]
-        );
+        $cols = "id, uuid, concern_type, patient_id, patient_uuid,
+                 patient_phone, external_thread_id, reference_type, reference_id,
+                 sent_at, expires_at, prompt_text, expected_response_kind";
 
-        if (empty($row)) {
-            // Digits-only fallback — accommodates format variants like
-            // '+1 (704) 555-0100' vs '7045550100' across patient_data.
+        $row = null;
+
+        // 1. Thread-id (strictly stronger than phone — unambiguous).
+        if ($threadId !== null) {
+            $row = sqlQuery(
+                "SELECT $cols
+                   FROM " . self::TABLE_MESSAGES . "
+                  WHERE external_thread_id = ? AND resolution IS NULL
+                    AND dispatch_status IN ('sent','dry_run')
+                    AND (expires_at IS NULL OR expires_at > NOW())
+               ORDER BY sent_at DESC LIMIT 1",
+                [$threadId]
+            );
+        }
+
+        // 2. Exact phone match.
+        if (empty($row) && trim($patientPhone) !== '') {
+            $row = sqlQuery(
+                "SELECT $cols
+                   FROM " . self::TABLE_MESSAGES . "
+                  WHERE patient_phone = ? AND resolution IS NULL
+                    AND dispatch_status IN ('sent','dry_run')
+                    AND (expires_at IS NULL OR expires_at > NOW())
+               ORDER BY sent_at DESC LIMIT 1",
+                [$patientPhone]
+            );
+        }
+
+        // 3. Digits-only phone fallback.
+        if (empty($row) && trim($patientPhone) !== '') {
             $digits = preg_replace('/\D/', '', $patientPhone);
             if (strlen($digits) >= 10) {
                 $tail = substr($digits, -10);
                 $row = sqlQuery(
-                    "SELECT id, uuid, concern_type, patient_id, patient_uuid,
-                            patient_phone, reference_type, reference_id,
-                            sent_at, expires_at, prompt_text, expected_response_kind
+                    "SELECT $cols
                        FROM " . self::TABLE_MESSAGES . "
                       WHERE REGEXP_REPLACE(patient_phone, '[^0-9]', '') LIKE CONCAT('%', ?)
                         AND resolution IS NULL
@@ -604,6 +649,7 @@ class PatientOutreachService
             'patient_id'             => (int) $row['patient_id'],
             'patient_uuid'           => (string) ($row['patient_uuid'] ?? ''),
             'patient_phone'          => (string) $row['patient_phone'],
+            'external_thread_id'     => (string) ($row['external_thread_id'] ?? ''),
             'reference_type'         => (string) ($row['reference_type'] ?? ''),
             'reference_id'           => isset($row['reference_id']) ? (int) $row['reference_id'] : null,
             'sent_at'                => (string) $row['sent_at'],

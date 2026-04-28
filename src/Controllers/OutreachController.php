@@ -220,18 +220,27 @@ class OutreachController
     }
 
     // -------------------------------------------------------------------
-    // GET /fhir/Outreach/lookup-by-phone?phone=...
+    // GET /fhir/Outreach/lookup-by-phone?phone=...&thread_id=...
     // -------------------------------------------------------------------
 
+    /**
+     * Inbound-reply correlation. Either `phone` OR `thread_id` (or
+     * both) is required. When both are provided, thread_id wins —
+     * it's a strictly stronger join key (1:1 mapping between
+     * outbound and inbound) provided by SMS providers like Doximity
+     * (PatientMessageThread/<uuid>). Phone is the fallback for
+     * providers that don't expose a thread id, or for legacy callers.
+     */
     public function lookupByPhone(HttpRestRequest $request): array
     {
-        $phone = trim((string) ($_GET['phone'] ?? ''));
-        if ($phone === '') {
-            return $this->error('phone query parameter is required', 400);
+        $phone    = trim((string) ($_GET['phone']     ?? ''));
+        $threadId = trim((string) ($_GET['thread_id'] ?? ''));
+        if ($phone === '' && $threadId === '') {
+            return $this->error('Either phone or thread_id query parameter is required', 400);
         }
-        $row = $this->service->lookupByPhone($phone);
+        $row = $this->service->lookupByPhone($phone, $threadId !== '' ? $threadId : null);
         if ($row === null) {
-            return $this->error('No pending outreach message for this phone', 404);
+            return $this->error('No pending outreach message for this phone/thread', 404);
         }
         return ['success' => true] + $row;
     }

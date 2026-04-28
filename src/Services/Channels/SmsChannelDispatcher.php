@@ -94,7 +94,22 @@ class SmsChannelDispatcher implements OutreachChannelDispatcher
             if ($isError) {
                 return ['success' => false, 'error' => $result, 'raw' => $result];
             }
-            return ['success' => true, 'message_id' => $result, 'raw' => $result];
+
+            // Doximity returns its PatientMessageThread/<uuid> as the
+            // sendSMS result, which is the SAME key inbound replies
+            // carry — so message_id IS the join key for inbound
+            // correlation. Surface it as thread_id so the platform
+            // can persist on module_outreach_messages.external_thread_id.
+            // Other providers (Twilio, RingCentral, Clickatell) return
+            // their own message id; if it's stable across the
+            // outbound/inbound pair we get the same correlation. If
+            // not, the platform falls back to phone-number lookup.
+            return [
+                'success'    => true,
+                'message_id' => $result,
+                'thread_id'  => $result,
+                'raw'        => $result,
+            ];
         } catch (\Throwable $e) {
             $this->logger->error("OUTREACH SMS dispatch failed", ['error' => $e->getMessage()]);
             return ['success' => false, 'error' => $e->getMessage()];

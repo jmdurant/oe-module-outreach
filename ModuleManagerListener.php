@@ -121,6 +121,7 @@ class ModuleManagerListener
                     `reference_type` VARCHAR(32) NULL,
                     `reference_id` INT NULL,
                     `channel` ENUM('sms','email','push','none') NOT NULL,
+                    `external_thread_id` VARCHAR(128) NULL,
                     `prompt_text` TEXT NULL,
                     `meta` JSON NULL,
                     `expected_response_kind` VARCHAR(32) DEFAULT 'no_reply',
@@ -138,9 +139,28 @@ class ModuleManagerListener
                     INDEX `idx_patient_recent` (`patient_id`, `sent_at`),
                     INDEX `idx_reference` (`reference_type`, `reference_id`),
                     INDEX `idx_expires` (`expires_at`),
-                    INDEX `idx_dispatch_status` (`dispatch_status`)
+                    INDEX `idx_dispatch_status` (`dispatch_status`),
+                    INDEX `idx_external_thread_id` (`external_thread_id`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
             );
+        } else {
+            // Idempotent column upgrades for already-installed sites.
+            // external_thread_id was added 2026-04-27 to support
+            // unambiguous inbound-reply correlation when the SMS
+            // provider exposes a stable per-thread id (Doximity does:
+            // PatientMessageThread/<uuid>). Phone-number lookup is
+            // the fallback; thread-id wins when both exist.
+            $col = sqlQuery(
+                "SHOW COLUMNS FROM `module_outreach_messages`
+                  WHERE Field = 'external_thread_id'"
+            );
+            if (empty($col)) {
+                sqlStatement(
+                    "ALTER TABLE `module_outreach_messages`
+                       ADD COLUMN `external_thread_id` VARCHAR(128) NULL AFTER `channel`,
+                       ADD INDEX `idx_external_thread_id` (`external_thread_id`)"
+                );
+            }
         }
 
         // -----------------------------------------------------------------
