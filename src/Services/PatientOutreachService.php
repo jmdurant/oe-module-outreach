@@ -327,6 +327,18 @@ class PatientOutreachService
             ];
         }
 
+        // Normalize UUID-shaped references to the integer ids concerns
+        // actually query against. Agents calling this tool naturally pass
+        // FHIR-canonical UUIDs (because that's what the rest of the MCP
+        // surface uses), but concerns do `(int) $referenceId` which casts
+        // UUID strings to 0. Resolving here keeps concern code unchanged
+        // and fixes every appointment/pnote/encounter-keyed concern
+        // retroactively. Numeric inputs pass through untouched.
+        $resolvedId = $this->resolveReferenceId($referenceType, $referenceId);
+        if ($resolvedId !== null) {
+            $referenceId = $resolvedId;
+        }
+
         $candidate = $concern->findCandidateByReference($referenceType, $referenceId);
         if ($candidate === null) {
             return [
@@ -1144,6 +1156,57 @@ class PatientOutreachService
     // -------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------
+
+    /**
+     * Resolve a (reference_type, reference_id) pair to the integer id
+     * concerns expect. Inputs:
+     *   - numeric → returned as int (or null when zero/negative)
+     *   - UUID string → looked up via OpenEMR's standard
+     *     UuidRegistry::uuidToBytes() + per-table uuid column
+     *     (`openemr_postcalendar_events.uuid`, `pnotes.uuid`, etc.)
+     *   - anything else → null (caller falls back to passing the input
+     *     through unchanged so existing string-id concerns stay
+     *     compatible)
+     *
+     * The mapping below covers the reference_types this platform's
+     * concerns currently use. New types added by future concerns
+     * register here when they need UUID support — concerns that only
+     * accept ints don't need an entry.
+     *
+     * Mirrors the BookingService.getAppointmentById / getPatientIdFromUuid
+     * pattern used elsewhere in the codebase. Same idiom, lifted to the
+     * platform layer so concerns don't each reimplement it.
+     */
+    private function resolveReferenceId(string $referenceType, $referenceId): ?int
+    {
+        if (is_numeric($referenceId)) {
+            $asInt = (int) $referenceId;
+            return $asInt > 0 ? $asInt : null;
+        }
+        if (!is_string($referenceId) || strlen($referenceId) < 10) {
+            return null;
+        }
+        $map = [
+            'appointment' => ['openemr_postcalendar_events', 'pc_eid'],
+            'pnote'       => ['pnotes',                       'id'],
+            'encounter'   => ['form_encounter',               'encounter'],
+            'prepayment'  => ['prepayment_requests',          'id'],
+        ];
+        if (!isset($map[$referenceType])) {
+            return null;
+        }
+        try {
+            $bytes = UuidRegistry::uuidToBytes($referenceId);
+        } catch (\Throwable $e) {
+            return null;
+        }
+        [$table, $idCol] = $map[$referenceType];
+        $row = sqlQuery(
+            "SELECT $idCol FROM $table WHERE uuid = ? LIMIT 1",
+            [$bytes]
+        );
+        return !empty($row) ? (int) $row[$idCol] : null;
+    }
 
     private function getPatient(int $patientId): ?array
     {
