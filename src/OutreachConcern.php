@@ -169,4 +169,27 @@ interface OutreachConcern
      * may return null or {success:true, resolution:'noted'}.
      */
     public function handleReply(int $messageId, string $replyText): ?array;
+
+    /*
+     * OPTIONAL HOOK — onExpire(int $messageId, array $row): ?array
+     *
+     * Concerns that need to take action when a message expires
+     * unanswered (e.g. a "final follow-up" rung whose silence IS the
+     * trigger to close the case + notify the referring provider) MAY
+     * declare this method. The platform calls it from expirePending()
+     * BEFORE flipping the row's resolution to 'no_response'.
+     *
+     * Return shape (when implemented):
+     *   - resolution: string — overrides the default 'no_response'
+     *     (e.g. 'lost', 'closed_no_contact'). Pass null/omit to
+     *     accept the default.
+     *   - downstream_action: ?array — audit log of any side effect
+     *     (faxes sent, status flips, etc.). Stored opportunistically.
+     *
+     * Not part of the interface so existing concerns aren't forced to
+     * implement a no-op. Platform uses method_exists() to detect.
+     * Recommended signature when declared:
+     *
+     *   public function onExpire(int $messageId, array $row): ?array
+     */
 }

@@ -19,6 +19,15 @@
  *                       too rich for SMS — e.g. prepayment requests
  *                       where the email is rich HTML and the SMS
  *                       is "Practice: $X due. Pay: <link>".
+ *   - context.phone_override (string) optional explicit destination
+ *                       phone, used when patient.phone_cell /
+ *                       phone_home are empty. Required by concerns
+ *                       operating without a real patient_data row —
+ *                       e.g. pending_referral_follow_up where the
+ *                       contact phone comes from the fax intake
+ *                       (parent/guardian) before any registration
+ *                       has happened. When patient phone IS set,
+ *                       phone_override is ignored.
  *
  * @package OpenEMR\Modules\Outreach\Services\Channels
  */
@@ -44,7 +53,12 @@ class SmsChannelDispatcher implements OutreachChannelDispatcher
 
     /**
      * Can reach this patient if they have any phone number on file.
-     * Cell preferred over home; either works.
+     * Cell preferred over home; either works. canDispatch is checked
+     * BEFORE dispatch with the patient row only — phone_override is
+     * a context-only signal we don't see here. dispatchMessage's
+     * channel walk asks canDispatch first; for no-patient-yet flows,
+     * the patient stub carries the override into phone_cell so this
+     * still returns true.
      */
     public function canDispatch(array $patient): bool
     {
@@ -54,9 +68,14 @@ class SmsChannelDispatcher implements OutreachChannelDispatcher
 
     public function dispatch(array $patient, string $messageText, array $context = []): array
     {
-        $phone = $this->normalizePhone(
-            $patient['phone_cell'] ?? $patient['phone_home'] ?? ''
-        );
+        // Patient phone takes precedence; context.phone_override is the
+        // fallback for concerns operating without a real patient_data
+        // row (pending referrals, etc).
+        $rawPhone = $patient['phone_cell']
+            ?? $patient['phone_home']
+            ?? $context['phone_override']
+            ?? '';
+        $phone = $this->normalizePhone((string) $rawPhone);
         if (empty($phone)) {
             return ['success' => false, 'error' => 'No phone on file'];
         }

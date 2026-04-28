@@ -238,6 +238,7 @@ class Bootstrap
         $event->addToFHIRRouteMap("POST /fhir/Outreach/sweep",           $wrap('sweep'));
         $event->addToFHIRRouteMap("POST /fhir/Outreach/send-one",        $wrap('sendOne'));
         $event->addToFHIRRouteMap("POST /fhir/Outreach/expire-pending",  $wrap('expirePending'));
+        $event->addToFHIRRouteMap("POST /fhir/Outreach/resolve-by-reference", $wrap('resolveByReference'));
         $event->addToFHIRRouteMap("GET /fhir/Outreach/messages",         $wrap('listMessages'));
         $event->addToFHIRRouteMap("GET /fhir/Outreach/lookup-by-phone",  $wrap('lookupByPhone'));
         $event->addToFHIRRouteMap("POST /fhir/Outreach/reply",           $wrap('reply'));

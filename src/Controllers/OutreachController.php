@@ -155,6 +155,48 @@ class OutreachController
     }
 
     // -------------------------------------------------------------------
+    // POST /fhir/Outreach/resolve-by-reference
+    // -------------------------------------------------------------------
+
+    /**
+     * System-driven resolution flip — closes out ALL unresolved rows
+     * for a (concern, reference) pair WITHOUT invoking the concern's
+     * handleReply hook. Use for state events that aren't patient
+     * replies: receptionist auto-link conversion, encounter signed,
+     * staff manual override, etc.
+     *
+     * Body: {concern_key, reference_type, reference_id, resolution, note?}
+     *
+     * Idempotent — replaying with already-resolved rows is a safe no-op
+     * (returns flipped_count=0, reason=no_unresolved_rows).
+     */
+    public function resolveByReference(HttpRestRequest $request): array
+    {
+        $body = $this->readJsonBody();
+        $concernKey   = trim((string) ($body['concern_key']    ?? ''));
+        $referenceType = trim((string) ($body['reference_type'] ?? ''));
+        $referenceId  = $body['reference_id'] ?? null;
+        $resolution   = trim((string) ($body['resolution']     ?? ''));
+        $note         = isset($body['note']) ? (string) $body['note'] : null;
+
+        if ($concernKey === '' || $referenceType === '' || $referenceId === null
+            || $referenceId === '' || $resolution === '') {
+            return $this->error(
+                'concern_key, reference_type, reference_id, and resolution are required',
+                400
+            );
+        }
+
+        return $this->service->resolveByReference(
+            $concernKey,
+            $referenceType,
+            $referenceId,
+            $resolution,
+            $note
+        );
+    }
+
+    // -------------------------------------------------------------------
     // GET /fhir/Outreach/messages
     // -------------------------------------------------------------------
 

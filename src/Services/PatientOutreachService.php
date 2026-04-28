@@ -190,13 +190,13 @@ class PatientOutreachService
 
             // Resolve patient details once per candidate.
             $patientId = (int) ($candidate['patient_id'] ?? 0);
-            if ($patientId <= 0) {
-                $skipped[] = ['reason' => 'missing_patient_id', 'candidate' => $candidate];
-                continue;
-            }
-            $patient = $this->getPatient($patientId);
+            $patient = $this->resolvePatientOrStub($patientId, $candidate);
             if (empty($patient)) {
-                $skipped[] = ['reason' => 'patient_not_found', 'patient_id' => $patientId];
+                if ($patientId <= 0) {
+                    $skipped[] = ['reason' => 'missing_patient_id', 'candidate' => $candidate];
+                } else {
+                    $skipped[] = ['reason' => 'patient_not_found', 'patient_id' => $patientId];
+                }
                 continue;
             }
 
@@ -365,15 +365,15 @@ class PatientOutreachService
         }
 
         $patientId = (int) ($candidate['patient_id'] ?? 0);
-        if ($patientId <= 0) {
-            return [
-                'success' => false,
-                'error'   => 'Concern returned a candidate without patient_id',
-                'reason'  => 'invalid_candidate',
-            ];
-        }
-        $patient = $this->getPatient($patientId);
+        $patient = $this->resolvePatientOrStub($patientId, $candidate);
         if (empty($patient)) {
+            if ($patientId <= 0) {
+                return [
+                    'success' => false,
+                    'error'   => 'Concern returned a candidate without patient_id and without meta.callback_phone for synthetic stub',
+                    'reason'  => 'invalid_candidate',
+                ];
+            }
             return [
                 'success' => false,
                 'error'   => "Patient $patientId not found",
@@ -743,14 +743,117 @@ class PatientOutreachService
     }
 
     /**
+     * System-driven resolution flip for ALL unresolved rows of a
+     * (concern, reference) pair. Does NOT invoke the concern's
+     * handleReply hook — this is for state events that aren't patient
+     * replies. Examples:
+     *   - Receptionist auto-links a fresh patient_register to a
+     *     pending-referral pnote → mark every rung row 'converted'
+     *   - Encounter signed-and-paid resolves an outstanding superbill
+     *     prompt → mark 'paid' (when the patient already paid through
+     *     a non-reply channel like the portal)
+     *   - Manual staff override "we know the answer; close this out"
+     *
+     * Multiple rows may match the (concern, reference) tuple — cadence
+     * concerns emit one row per rung. All matching unresolved rows get
+     * the same resolution + the same note. Rows already resolved are
+     * left alone.
+     *
+     * Returns count of rows flipped + the ids for audit.
+     *
+     * @param string $concernKey   concern_type filter
+     * @param string $referenceType reference_type filter
+     * @param mixed  $referenceId   reference_id filter (int)
+     * @param string $resolution    target resolution string
+     * @param string|null $note     optional free-text resolution_reply
+     */
+    public function resolveByReference(
+        string $concernKey,
+        string $referenceType,
+        $referenceId,
+        string $resolution,
+        ?string $note = null
+    ): array {
+        $refIdInt = (int) $referenceId;
+        if ($concernKey === '' || $referenceType === '' || $refIdInt <= 0 || $resolution === '') {
+            return [
+                'success' => false,
+                'error'   => 'concern_key, reference_type, reference_id, and resolution are all required',
+            ];
+        }
+
+        // Find matching unresolved rows first so we can return ids for
+        // audit. Also cheap idempotency: caller can replay the same call
+        // safely (already-resolved rows are silently skipped).
+        $matches = [];
+        $rs = sqlStatement(
+            "SELECT id FROM " . self::TABLE_MESSAGES . "
+              WHERE concern_type = ? AND reference_type = ? AND reference_id = ?
+                AND resolution IS NULL",
+            [$concernKey, $referenceType, $refIdInt]
+        );
+        while ($row = sqlFetchArray($rs)) {
+            $matches[] = (int) $row['id'];
+        }
+
+        if (empty($matches)) {
+            return [
+                'success'      => true,
+                'flipped_count' => 0,
+                'flipped_ids'  => [],
+                'reason'       => 'no_unresolved_rows',
+            ];
+        }
+
+        $placeholders = implode(',', array_fill(0, count($matches), '?'));
+        sqlStatement(
+            "UPDATE " . self::TABLE_MESSAGES . "
+                SET resolution = ?, resolution_reply = ?, resolved_at = NOW()
+              WHERE id IN ($placeholders) AND resolution IS NULL",
+            array_merge(
+                [$resolution, $note !== null ? substr($note, 0, 1000) : null],
+                $matches
+            )
+        );
+
+        return [
+            'success'       => true,
+            'concern_type'  => $concernKey,
+            'reference_type' => $referenceType,
+            'reference_id'  => $refIdInt,
+            'resolution'    => $resolution,
+            'flipped_count' => count($matches),
+            'flipped_ids'   => $matches,
+        ];
+    }
+
+    /**
      * Bulk-flip stale pending messages to no_response so staff queries
      * surface non-responders.
+     *
+     * For each expiring row, the owning concern gets a chance to
+     * intercept via the optional onExpire(int $messageId, array $row)
+     * hook BEFORE the resolution flip. The hook can:
+     *   - Override the resolution from the default 'no_response' to
+     *     something concern-specific (e.g. 'lost' for a pending
+     *     referral whose silence triggers case-closure)
+     *   - Run a side effect (e.g. fax the referring provider, flip an
+     *     associated record, queue a downstream notification)
+     *
+     * Concerns that DON'T declare onExpire fall through to the default
+     * 'no_response' flip — same behavior as before. The hook is
+     * detected via method_exists so existing concerns don't need to
+     * implement a no-op stub.
      */
     public function expirePending(int $limit = 200): array
     {
         $now = date('Y-m-d H:i:s');
         $rows = sqlStatement(
-            "SELECT id, concern_type, patient_id, patient_phone, sent_at, expires_at
+            "SELECT id, uuid, concern_type, concern_subtype,
+                    patient_id, patient_uuid, patient_phone, patient_email,
+                    reference_type, reference_id,
+                    channel, external_thread_id, prompt_text, meta,
+                    expected_response_kind, sent_at, expires_at
                FROM " . self::TABLE_MESSAGES . "
               WHERE resolution IS NULL
                 AND dispatch_status IN ('sent','dry_run')
@@ -760,26 +863,63 @@ class PatientOutreachService
             [$now]
         );
 
+        $registry = $this->getConcernRegistry();
         $expired = [];
-        $ids = [];
+        // Per-row resolution: default is 'no_response' but the concern's
+        // onExpire hook may override (e.g. 'lost' for pending referral).
+        // Group ids by resolution so we can issue one UPDATE per group.
+        $byResolution = []; // resolution => [ids]
+
         while ($row = sqlFetchArray($rows)) {
+            $messageId    = (int) $row['id'];
+            $concernKey   = (string) $row['concern_type'];
+            $resolution   = 'no_response';
+            $hookResult   = null;
+
+            $concern = $registry[$concernKey] ?? null;
+            if ($concern !== null && method_exists($concern, 'onExpire')) {
+                try {
+                    $hookResult = $concern->onExpire($messageId, $row);
+                    if (is_array($hookResult)
+                        && !empty($hookResult['resolution'])
+                        && is_string($hookResult['resolution'])
+                    ) {
+                        $resolution = $hookResult['resolution'];
+                    }
+                } catch (\Throwable $e) {
+                    $this->logger->error("OUTREACH onExpire threw for $concernKey msg=$messageId", [
+                        'error' => $e->getMessage(),
+                    ]);
+                    // Hook failure is isolated — the row still gets the
+                    // default no_response flip so audit doesn't stall.
+                }
+            }
+
+            $byResolution[$resolution][] = $messageId;
             $expired[] = [
-                'message_id' => (int) $row['id'],
-                'concern_type' => (string) $row['concern_type'],
-                'patient_id' => (int) $row['patient_id'],
+                'message_id'   => $messageId,
+                'concern_type' => $concernKey,
+                'patient_id'   => (int) $row['patient_id'],
                 'patient_phone' => (string) ($row['patient_phone'] ?? ''),
-                'sent_at' => (string) $row['sent_at'],
-                'expires_at' => (string) $row['expires_at'],
+                'sent_at'      => (string) $row['sent_at'],
+                'expires_at'   => (string) $row['expires_at'],
+                'resolution'   => $resolution,
+                'on_expire'    => $hookResult,
             ];
-            $ids[] = (int) $row['id'];
         }
-        if (!empty($ids)) {
+
+        // One UPDATE per distinct resolution. Default case ('no_response')
+        // is the only one for concerns without onExpire.
+        foreach ($byResolution as $resolution => $ids) {
+            if (empty($ids)) {
+                continue;
+            }
             $placeholders = implode(',', array_fill(0, count($ids), '?'));
             sqlStatement(
                 "UPDATE " . self::TABLE_MESSAGES . "
-                    SET resolution = 'no_response', resolved_at = NOW()
+                    SET resolution = ?, resolved_at = NOW()
                   WHERE id IN ($placeholders) AND resolution IS NULL",
-                $ids
+                array_merge([$resolution], $ids)
             );
         }
 
@@ -863,6 +1003,14 @@ class PatientOutreachService
 
     public function isRateLimited(int $patientId, string $concernKey): bool
     {
+        // Synthetic patients (pid=0, no real patient_data row) share
+        // one bucket and would exhaust the limit collectively, which is
+        // wrong — each pending-referral pnote is a distinct contact.
+        // The dedup-by-(concern, reference) check upstream already
+        // prevents per-reference spam. Skip the rate-limit for them.
+        if ($patientId <= 0) {
+            return false;
+        }
         $today = date('Y-m-d');
         $row = sqlQuery(
             "SELECT COALESCE(SUM(count),0) AS total FROM " . self::TABLE_RATE_LIMIT . "
@@ -876,6 +1024,9 @@ class PatientOutreachService
 
     private function incrementRateLimit(int $patientId, string $concernKey): void
     {
+        if ($patientId <= 0) {
+            return; // see isRateLimited — synthetic patients aren't tracked
+        }
         sqlStatement(
             "INSERT INTO " . self::TABLE_RATE_LIMIT . "
                 (patient_id, bucket_date, concern_type, count)
@@ -988,6 +1139,50 @@ class PatientOutreachService
             [$patientId]
         );
         return $row ?: null;
+    }
+
+    /**
+     * Resolve a candidate's recipient. For real patients (patient_id>0)
+     * this is just getPatient(). For concerns operating without a
+     * registered patient yet — pending-referral pnotes whose contact
+     * info comes from a fax intake before any patient_register has
+     * happened — we synthesize a stub patient row from candidate.meta
+     * so downstream code (channel.canDispatch, channel.dispatch,
+     * writeMessageRow) sees a uniform shape.
+     *
+     * Stub shape (when patient_id=0 + meta.callback_phone is set):
+     *   pid:        0
+     *   uuid:       null
+     *   fname:      meta.contact_fname (or empty)
+     *   lname:      meta.contact_lname (or empty)
+     *   phone_cell: meta.callback_phone
+     *   phone_home: null
+     *   email:      meta.contact_email (or empty)
+     *
+     * Returns null when:
+     *   - patient_id>0 AND patient_data row not found, OR
+     *   - patient_id=0 AND no meta.callback_phone (concern can't reach
+     *     anyone — caller skips the candidate)
+     */
+    private function resolvePatientOrStub(int $patientId, array $candidate): ?array
+    {
+        if ($patientId > 0) {
+            return $this->getPatient($patientId);
+        }
+        $meta = $candidate['meta'] ?? [];
+        $callbackPhone = isset($meta['callback_phone']) ? trim((string) $meta['callback_phone']) : '';
+        if ($callbackPhone === '') {
+            return null;
+        }
+        return [
+            'pid'        => 0,
+            'uuid'       => null,
+            'fname'      => (string) ($meta['contact_fname'] ?? ''),
+            'lname'      => (string) ($meta['contact_lname'] ?? ''),
+            'phone_cell' => $callbackPhone,
+            'phone_home' => null,
+            'email'      => (string) ($meta['contact_email'] ?? ''),
+        ];
     }
 
     private function safeUuidToString($uuid): ?string
