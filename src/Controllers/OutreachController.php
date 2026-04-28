@@ -98,7 +98,14 @@ class OutreachController
      *
      * Body: {concern_key, reference_type, reference_id,
      *        prompt_override?, expires_after_hours?, skip_dedup?,
-     *        meta?: {...}}
+     *        dry_run?, meta?: {...}}
+     *
+     * dry_run=true skips the actual channel dispatch but still writes
+     * the module_outreach_messages row + returns the message_id, so
+     * test harnesses can exercise the full concern pipeline (build →
+     * persist → reply via POST /reply) without spamming real
+     * SMS/email/push providers. Opt-out, rate-limit, and dedup checks
+     * still fire — dry_run is the only short-circuit.
      *
      * `meta` is an arbitrary dict of concern-specific context that
      * gets merged into candidate.meta after findCandidateByReference
@@ -125,6 +132,9 @@ class OutreachController
         }
         if (isset($body['skip_dedup'])) {
             $overrides['skip_dedup'] = (bool) $body['skip_dedup'];
+        }
+        if (isset($body['dry_run'])) {
+            $overrides['dry_run'] = (bool) $body['dry_run'];
         }
         if (isset($body['meta']) && is_array($body['meta'])) {
             $overrides['meta'] = $body['meta'];

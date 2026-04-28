@@ -282,6 +282,14 @@ class PatientOutreachService
      *   - skip_dedup: bool — true to dispatch even when an unresolved
      *     row already exists for the same (concern, reference). Use
      *     sparingly — exposed for staff "resend" workflows.
+     *   - dry_run: bool — true to skip the actual channel dispatch (no
+     *     real SMS/email/push) but still write the audit row and
+     *     return a message_id. Use for bulk simulation: a test harness
+     *     can call sendOne(dry_run=true) for many patients, then resolve
+     *     each via handleReply(message_id, "Y") to exercise the full
+     *     concern pipeline without spamming the SMS provider. Honors
+     *     opt-out and rate-limit checks the same way real sends do —
+     *     dry_run only short-circuits the dispatcher, nothing else.
      *
      * Returns the same shape as a sweep's `sent[]` / `skipped[]`
      * entries plus a top-level success flag for convenience.
@@ -345,6 +353,15 @@ class PatientOutreachService
         // point of the override.
         if (isset($overrides['meta']) && is_array($overrides['meta'])) {
             $candidate['meta'] = array_merge($candidate['meta'] ?? [], $overrides['meta']);
+        }
+
+        // Per-call dry-run: write a tracking row marked dry_run instead
+        // of hitting the channel dispatcher. dispatchMessage reads this
+        // off the candidate dict so simulation flows through the same
+        // path real sends do (opt-out, rate-limit, dedup, channel walk
+        // all still apply — only the actual provider call is skipped).
+        if (isset($overrides['dry_run']) && (bool) $overrides['dry_run']) {
+            $candidate['dry_run'] = true;
         }
 
         $patientId = (int) ($candidate['patient_id'] ?? 0);
@@ -438,7 +455,13 @@ class PatientOutreachService
         $registry = $this->getChannelRegistry();
         $context = $candidate['meta'] ?? [];
 
-        $dryRun = $this->config->isDryRun();
+        // Dry-run is on if either the global flag is set OR the
+        // candidate carries a per-call dry_run override (sendOne path).
+        // Either route lands at the same writeMessageRow with status
+        // 'dry_run' — no actual SMS/email/push is dispatched, but the
+        // audit row exists so handleReply(message_id, ...) can resolve
+        // it later. This is the simulation seam.
+        $dryRun = !empty($candidate['dry_run']) || $this->config->isDryRun();
         $expiresHours = $candidate['expires_after_hours']
             ?? $this->getConcernExpiresHours($concernKey)
             ?? $concern->defaultExpiresAfterHours();
@@ -456,13 +479,19 @@ class PatientOutreachService
                 continue;
             }
 
-            // Dry run: write a tracking row marked dry_run, no actual send.
+            // Dry run: write a tracking row marked dry_run, no actual
+            // send. success=true because the audit row was written
+            // successfully — the simulation outcome IS success here,
+            // and callers (sweepConcern, sendOne) check this flag to
+            // decide whether to bucket as sent vs. skipped/failed.
             if ($dryRun) {
-                return $this->writeMessageRow(
+                $row = $this->writeMessageRow(
                     $messageUuidString, $concernKey, $concern, $candidate,
                     $patient, $channelId, $messageText, $expiresAt,
                     'dry_run', null, []
                 );
+                $row['success'] = true;
+                return $row;
             }
 
             // Real dispatch.
