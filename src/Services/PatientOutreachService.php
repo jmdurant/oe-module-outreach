@@ -853,7 +853,7 @@ class PatientOutreachService
                     patient_id, patient_uuid, patient_phone, patient_email,
                     reference_type, reference_id,
                     channel, external_thread_id, prompt_text, meta,
-                    expected_response_kind, sent_at, expires_at
+                    expected_response_kind, dispatch_status, sent_at, expires_at
                FROM " . self::TABLE_MESSAGES . "
               WHERE resolution IS NULL
                 AND dispatch_status IN ('sent','dry_run')
@@ -953,9 +953,10 @@ class PatientOutreachService
             return $this->channels;
         }
         // Auto-register the three default channel dispatchers shipped with
-        // this module. Modules that ship their own dispatcher (e.g. a
-        // future Twilio Voice channel) call addChannel() to register —
-        // last-write-wins on key collision.
+        // this module. Other modules contribute additional dispatchers via
+        // the OutreachChannelRegistryEvent (mirrors the concern-registry
+        // pattern) — see Bootstrap::dispatchChannelRegistry. Last-write-wins
+        // on channel-key collision.
         $this->channels = [];
         try {
             $this->addChannel(new Channels\SmsChannelDispatcher());
@@ -963,6 +964,19 @@ class PatientOutreachService
             $this->addChannel(new Channels\PushChannelDispatcher());
         } catch (\Throwable $e) {
             $this->logger->error("OUTREACH: default channel dispatcher registration failed", [
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        // Let other modules plug in their own dispatchers (FaxChannelDispatcher
+        // from oe-module-doximity, future VoicemailChannelDispatcher, etc.).
+        try {
+            $event = $this->bootstrap->dispatchChannelRegistry();
+            foreach ($event->getChannels() as $dispatcher) {
+                $this->addChannel($dispatcher);
+            }
+        } catch (\Throwable $e) {
+            $this->logger->error("OUTREACH: third-party channel registry dispatch failed", [
                 'error' => $e->getMessage(),
             ]);
         }

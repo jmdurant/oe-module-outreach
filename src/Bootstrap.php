@@ -279,4 +279,24 @@ class Bootstrap
         $this->eventDispatcher->dispatch($event, OutreachConcernRegistryEvent::EVENT_HANDLE);
         return $event;
     }
+
+    // -------------------------------------------------------------------
+    // Channel registry — other modules contribute their dispatchers here
+    // -------------------------------------------------------------------
+
+    /**
+     * Fire the channel registry event so modules with their own provider
+     * wires (oe-module-doximity's FaxChannelDispatcher, a future
+     * VoicemailChannelDispatcher, RingCentral / EtherFax dispatchers, etc.)
+     * can plug in. Called by PatientOutreachService::getChannelRegistry()
+     * AFTER the platform's three default dispatchers (SMS / Email / Push)
+     * are auto-registered. Subscribers ADD to that set; key collisions
+     * are last-write-wins.
+     */
+    public function dispatchChannelRegistry(): \OpenEMR\Modules\Outreach\Events\OutreachChannelRegistryEvent
+    {
+        $event = new \OpenEMR\Modules\Outreach\Events\OutreachChannelRegistryEvent();
+        $this->eventDispatcher->dispatch($event, \OpenEMR\Modules\Outreach\Events\OutreachChannelRegistryEvent::EVENT_HANDLE);
+        return $event;
+    }
 }
