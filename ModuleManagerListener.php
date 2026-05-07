@@ -1,8 +1,15 @@
 <?php
 
+use OpenEMR\Core\AbstractModuleActionListener;
+
 /**
- * ModuleManagerListener — runs install/enable/disable hooks for the
- * Patient Outreach module.
+ * ModuleManagerListener — runs install/enable/disable/unregister hooks
+ * for the Patient Outreach module.
+ *
+ * Lives in the GLOBAL namespace and extends AbstractModuleActionListener
+ * — that's the contract Laminas Module Manager looks up. A namespaced
+ * listener is invisible to the Module Manager UI, which is why
+ * Install / Disable / Reset silently no-op on a misshapen module.
  *
  * On install + first-enable, calls setupDatabase() which creates the
  * four tables that back the central outreach state. Migrations are
@@ -11,37 +18,46 @@
  *
  * @package OpenEMR\Modules\Outreach
  */
-
-namespace OpenEMR\Modules\Outreach;
-
-class ModuleManagerListener
+class ModuleManagerListener extends AbstractModuleActionListener
 {
     public function __construct()
     {
-        // No-op constructor. OpenEMR's module manager instantiates listeners
-        // before kernel boot — keep work in the action methods, not here.
+        parent::__construct();
     }
 
     /**
-     * Module-manager dispatch table. install_action / enable / disable
-     * each get a chance to fire. We want setupDatabase to run on
-     * install AND enable so re-enabling after a disable picks up any
-     * schema additions shipped in the meantime.
+     * Required by AbstractModuleActionListener. The Module Manager uses
+     * this to scope autoload + dispatch lookups for namespaced classes
+     * inside this module (Bootstrap, services, controllers, etc.).
+     */
+    public static function getModuleNamespace(): string
+    {
+        return 'OpenEMR\\Modules\\Outreach\\';
+    }
+
+    /**
+     * Required by AbstractModuleActionListener. Module Manager calls
+     * this to obtain the listener instance for dispatch.
+     */
+    public static function initListenerSelf(): ModuleManagerListener
+    {
+        return new self();
+    }
+
+    /**
+     * Module-manager dispatch. install / enable / disable / unregister
+     * each route through here based on which lifecycle action the user
+     * clicked in Administration → Modules → Manage.
      */
     public function moduleManagerAction($methodName, $modId, string $currentActionStatus = 'Success'): string
     {
-        if (method_exists($this, $methodName)) {
-            return $this->$methodName($modId, $currentActionStatus);
+        if (method_exists(self::class, $methodName)) {
+            return self::$methodName($modId, $currentActionStatus);
         }
-        return $currentActionStatus;
+        return "Module cleanup method $methodName does not exist.";
     }
 
-    public function install_action($modId, $currentActionStatus = ''): string
-    {
-        return $this->install($modId, $currentActionStatus);
-    }
-
-    public function install($modId, $currentActionStatus): string
+    public function install($modId, $currentActionStatus): mixed
     {
         try {
             $this->setupDatabase();
@@ -52,7 +68,7 @@ class ModuleManagerListener
         }
     }
 
-    public function enable($modId, $currentActionStatus): string
+    public function enable($modId, $currentActionStatus): mixed
     {
         try {
             // Re-running setupDatabase on enable is safe (idempotent SQL).
@@ -66,12 +82,24 @@ class ModuleManagerListener
         }
     }
 
-    public function disable($modId, $currentActionStatus): string
+    public function disable($modId, $currentActionStatus): mixed
     {
         // Disable is intentionally non-destructive — keep the tables
-        // and data so re-enabling restores everything. Practice can
-        // drop the tables manually if they truly want to remove the
-        // module; we don't gate that on a UI flow.
+        // and data so re-enabling restores everything. To truly remove
+        // the module's data, use Unregister.
+        return 'Success';
+    }
+
+    public function unregister($modId, $currentActionStatus): mixed
+    {
+        // Optional hard cleanup. Currently a no-op so a practice that
+        // unregisters by mistake doesn't lose audit history. To enable
+        // table drops, uncomment below:
+        //
+        // sqlStatement("DROP TABLE IF EXISTS `module_outreach_rate_limits`");
+        // sqlStatement("DROP TABLE IF EXISTS `module_outreach_patient_prefs`");
+        // sqlStatement("DROP TABLE IF EXISTS `module_outreach_concerns_config`");
+        // sqlStatement("DROP TABLE IF EXISTS `module_outreach_messages`");
         return 'Success';
     }
 
