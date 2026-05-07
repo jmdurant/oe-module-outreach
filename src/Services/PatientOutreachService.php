@@ -580,7 +580,7 @@ class PatientOutreachService
 
         // Bump the rate-limit counter for sent / dry_run only.
         if (in_array($dispatchStatus, ['sent', 'dry_run'], true)) {
-            $this->incrementRateLimit((int) $patient['pid'], $concernKey);
+            $this->incrementRateLimit((int) $patient['pid'], $concernKey, $patientUuid);
         }
 
         return [
@@ -1038,27 +1038,55 @@ class PatientOutreachService
             return false;
         }
         $today = date('Y-m-d');
-        $row = sqlQuery(
-            "SELECT COALESCE(SUM(count),0) AS total FROM " . self::TABLE_RATE_LIMIT . "
-              WHERE patient_id = ? AND bucket_date = ?",
-            [$patientId, $today]
+
+        // Resolve the CURRENT patient_uuid for this pid. Stale rows from
+        // a deleted patient who previously held this pid (sim clean_slate
+        // or production hard-delete) carry the prior uuid; including the
+        // current uuid in the filter ignores them. Legacy rows pre-dating
+        // the patient_uuid column have NULL uuid and also match — they
+        // remain attributed to the live patient at this pid for back-
+        // compat. NULLs are never equal in SQL, so we use IS NULL
+        // explicitly rather than `= NULL`.
+        $pdRow = sqlQuery(
+            "SELECT uuid FROM patient_data WHERE pid = ? LIMIT 1",
+            [$patientId]
         );
+        $currentUuid = $this->safeUuidToString($pdRow['uuid'] ?? null);
+
+        if ($currentUuid !== null) {
+            $row = sqlQuery(
+                "SELECT COALESCE(SUM(count),0) AS total FROM " . self::TABLE_RATE_LIMIT . "
+                  WHERE patient_id = ? AND bucket_date = ?
+                    AND (patient_uuid IS NULL OR patient_uuid = ?)",
+                [$patientId, $today, $currentUuid]
+            );
+        } else {
+            // No live patient_data row for this pid — likely deletion-in-flight
+            // or pre-registration synthetic. Fall back to legacy behavior so
+            // we don't accidentally bypass an active opt-out / rate cap during
+            // the brief window before the row exists.
+            $row = sqlQuery(
+                "SELECT COALESCE(SUM(count),0) AS total FROM " . self::TABLE_RATE_LIMIT . "
+                  WHERE patient_id = ? AND bucket_date = ?",
+                [$patientId, $today]
+            );
+        }
         $total = (int) ($row['total'] ?? 0);
         $limit = $this->config->getDefaultRateLimit();
         return $limit > 0 && $total >= $limit;
     }
 
-    private function incrementRateLimit(int $patientId, string $concernKey): void
+    private function incrementRateLimit(int $patientId, string $concernKey, ?string $patientUuid = null): void
     {
         if ($patientId <= 0) {
             return; // see isRateLimited — synthetic patients aren't tracked
         }
         sqlStatement(
             "INSERT INTO " . self::TABLE_RATE_LIMIT . "
-                (patient_id, bucket_date, concern_type, count)
-             VALUES (?, CURDATE(), ?, 1)
+                (patient_id, patient_uuid, bucket_date, concern_type, count)
+             VALUES (?, ?, CURDATE(), ?, 1)
              ON DUPLICATE KEY UPDATE count = count + 1",
-            [$patientId, $concernKey]
+            [$patientId, $patientUuid, $concernKey]
         );
     }
 

@@ -225,14 +225,37 @@ class ModuleManagerListener
                 "CREATE TABLE IF NOT EXISTS `module_outreach_rate_limits` (
                     `id` INT AUTO_INCREMENT PRIMARY KEY,
                     `patient_id` INT NOT NULL,
+                    `patient_uuid` VARCHAR(36) NULL,
                     `bucket_date` DATE NOT NULL,
                     `concern_type` VARCHAR(64) NULL,
                     `count` INT DEFAULT 0,
                     `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                    UNIQUE KEY `uk_bucket` (`patient_id`, `bucket_date`, `concern_type`),
+                    UNIQUE KEY `uk_bucket` (`patient_id`, `patient_uuid`, `bucket_date`, `concern_type`),
                     INDEX `idx_bucket_date` (`bucket_date`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
             );
+        } else {
+            // Idempotent column upgrade for already-installed sites.
+            // patient_uuid was added 2026-05-06 to disambiguate recycled
+            // pids — when patient_data is wiped (sim clean_slate or hard
+            // delete in production) and a new patient is later assigned
+            // the same pid, the prior patient's stale rate_limits rows
+            // would silently count toward the new patient's daily cap
+            // because the (patient_id, bucket_date) tuple alone can't
+            // tell them apart. Including patient_uuid in the unique key
+            // means recycled pids start fresh.
+            $col = sqlQuery(
+                "SHOW COLUMNS FROM `module_outreach_rate_limits`
+                  WHERE Field = 'patient_uuid'"
+            );
+            if (empty($col)) {
+                sqlStatement(
+                    "ALTER TABLE `module_outreach_rate_limits`
+                       ADD COLUMN `patient_uuid` VARCHAR(36) NULL AFTER `patient_id`,
+                       DROP INDEX `uk_bucket`,
+                       ADD UNIQUE KEY `uk_bucket` (`patient_id`, `patient_uuid`, `bucket_date`, `concern_type`)"
+                );
+            }
         }
     }
 }

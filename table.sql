@@ -51,7 +51,10 @@
 -- Authoritative source is module_outreach_messages.
 -- ============================================================================
 -- CREATE TABLE module_outreach_rate_limits (
---   id, patient_id, bucket_date, concern_type,
+--   id, patient_id, patient_uuid, bucket_date, concern_type,
 --   count, updated_at,
---   UNIQUE KEY (patient_id, bucket_date, concern_type)
+--   UNIQUE KEY (patient_id, patient_uuid, bucket_date, concern_type)
 -- );
+-- patient_uuid is included in the unique key so a recycled pid (after
+-- patient_data wipe + re-registration) starts with a fresh bucket
+-- instead of inheriting the deleted patient's stale daily count.
