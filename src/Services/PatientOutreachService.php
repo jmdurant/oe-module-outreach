@@ -247,7 +247,7 @@ class PatientOutreachService
 
             $channelOrder = $this->resolveChannelOrder($patientId, $key);
             $dispatchResult = $this->dispatchMessage(
-                $patient, $messageText, $channelOrder, $key, $concern, $candidate
+                $patient, $messageText, $channelOrder, $key, $concern, $candidate, $options
             );
 
             if (!empty($dispatchResult['success'])) {
@@ -444,8 +444,14 @@ class PatientOutreachService
         }
 
         $channelOrder = $this->resolveChannelOrder($patientId, $concernKey);
+        // Surface as_of from overrides into the dispatch path so sent_at +
+        // expires_at on the message row stamp synthetic time when SimClinic
+        // mode plumbed it through. Production callers omit as_of.
+        $sendOneOptions = isset($overrides['as_of']) && $overrides['as_of'] !== ''
+            ? ['as_of' => (string) $overrides['as_of']]
+            : [];
         $result = $this->dispatchMessage(
-            $patient, $messageText, $channelOrder, $concernKey, $concern, $candidate
+            $patient, $messageText, $channelOrder, $concernKey, $concern, $candidate, $sendOneOptions
         );
         $result['success'] = !empty($result['success']);
         return $result;
@@ -462,7 +468,8 @@ class PatientOutreachService
         array $channelOrder,
         string $concernKey,
         OutreachConcern $concern,
-        array $candidate
+        array $candidate,
+        array $options = []
     ): array {
         $registry = $this->getChannelRegistry();
         $context = $candidate['meta'] ?? [];
@@ -477,9 +484,18 @@ class PatientOutreachService
         $expiresHours = $candidate['expires_after_hours']
             ?? $this->getConcernExpiresHours($concernKey)
             ?? $concern->defaultExpiresAfterHours();
-        $expiresAt = $expiresHours > 0
-            ? date('Y-m-d H:i:s', strtotime("+$expiresHours hours"))
-            : null;
+        // SimClinic-aware: anchor expires_at to the synthetic clock when
+        // $options['as_of'] is plumbed through. Without this, multi-day
+        // runs stamp expires_at = real_now + N hours, then later sweeps
+        // (running at synthetic_now > real_now + days) treat the message
+        // as already-expired before its synthetic-window even opens. Same
+        // failure mode as sent_at; same fix.
+        $expiresAt = null;
+        if ($expiresHours > 0) {
+            $expiresAt = $this->nowFromOptions($options)
+                ->modify("+$expiresHours hours")
+                ->format('Y-m-d H:i:s');
+        }
 
         $messageUuidString = $this->generateMessageUuid();
 
@@ -500,7 +516,7 @@ class PatientOutreachService
                 $row = $this->writeMessageRow(
                     $messageUuidString, $concernKey, $concern, $candidate,
                     $patient, $channelId, $messageText, $expiresAt,
-                    'dry_run', null, []
+                    'dry_run', null, [], $options
                 );
                 $row['success'] = true;
                 return $row;
@@ -514,7 +530,7 @@ class PatientOutreachService
             $row = $this->writeMessageRow(
                 $messageUuidString, $concernKey, $concern, $candidate,
                 $patient, $channelId, $messageText, $expiresAt,
-                $status, $detail, $result
+                $status, $detail, $result, $options
             );
             $row['success'] = !empty($result['success']);
             $row['error']      = $row['success'] ? null : $detail;
@@ -527,7 +543,7 @@ class PatientOutreachService
         $row = $this->writeMessageRow(
             $messageUuidString, $concernKey, $concern, $candidate,
             $patient, 'none', $messageText, $expiresAt,
-            'skipped', 'no_channel_can_dispatch', []
+            'skipped', 'no_channel_can_dispatch', [], $options
         );
         $row['success']    = false;
         $row['error']      = 'No channel can reach this patient';
@@ -538,12 +554,21 @@ class PatientOutreachService
     private function writeMessageRow(
         string $uuid, string $concernKey, OutreachConcern $concern, array $candidate,
         array $patient, string $channel, string $messageText, ?string $expiresAt,
-        string $dispatchStatus, ?string $dispatchResult, array $resultRaw
+        string $dispatchStatus, ?string $dispatchResult, array $resultRaw,
+        array $options = []
     ): array {
         $patientUuid = $this->safeUuidToString($patient['uuid'] ?? null);
         $refType = $candidate['reference_type'] ?? null;
         $refId   = isset($candidate['reference_id']) ? (int) $candidate['reference_id'] : null;
-        $sentAt  = in_array($dispatchStatus, ['sent', 'dry_run'], true) ? date('Y-m-d H:i:s') : null;
+        // SimClinic-aware: sent_at anchors to $options['as_of'] when set.
+        // This is the field PendingReferralFollowUpConcern reads to compute
+        // "hours since last rung" for the d+1/d+3 cadence; without honoring
+        // synthetic time, multi-day runs see real-wall-clock sent_at and
+        // synthetic-clock now() — the elapsed math drifts unpredictably
+        // and rungs fire on stale offsets.
+        $sentAt = in_array($dispatchStatus, ['sent', 'dry_run'], true)
+            ? $this->nowFromOptions($options)->format('Y-m-d H:i:s')
+            : null;
         $meta    = json_encode($candidate['meta'] ?? new \stdClass(), JSON_UNESCAPED_SLASHES);
 
         // Capture the provider's stable per-thread id when the
@@ -1304,5 +1329,34 @@ class PatientOutreachService
     {
         $bin = (new UuidRegistry(['table_name' => self::TABLE_MESSAGES]))->createUuid();
         return UuidRegistry::uuidToString($bin);
+    }
+
+    /**
+     * Resolve $options['as_of'] (ISO 8601 or any DateTime-parseable
+     * string) to a DateTimeImmutable. Falls back to wall-clock when
+     * not set or unparseable. Mirrors ConcernClock in oe-module-pnotes-fhir
+     * so platform writes (sent_at, expires_at on module_outreach_messages)
+     * stamp synthetic time when SimClinic mode plumbs it through, while
+     * production callers (omitting as_of) get unchanged wall-clock
+     * behavior. Kept inline here rather than imported from pnotes-fhir
+     * to keep oe-module-outreach a leaf dependency — the inverse import
+     * direction matches OutreachConcern flow (concerns import from us).
+     *
+     * Unparseable as_of → log + fall back to wall-clock; cadence drift
+     * from caller-supplied junk should not break outreach dispatch.
+     */
+    private function nowFromOptions(array $options): \DateTimeImmutable
+    {
+        $asOf = $options['as_of'] ?? null;
+        if (is_string($asOf) && $asOf !== '') {
+            try {
+                return new \DateTimeImmutable($asOf);
+            } catch (\Throwable $e) {
+                $this->logger->warning(
+                    "OUTREACH: ignoring unparseable as_of '{$asOf}': " . $e->getMessage()
+                );
+            }
+        }
+        return new \DateTimeImmutable();
     }
 }

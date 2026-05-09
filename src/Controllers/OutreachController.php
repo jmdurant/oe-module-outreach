@@ -139,6 +139,14 @@ class OutreachController
         if (isset($body['meta']) && is_array($body['meta'])) {
             $overrides['meta'] = $body['meta'];
         }
+        // SimClinic-aware: as_of plumbs through to dispatchMessage's
+        // $options arg so the message row's sent_at + expires_at land
+        // on synthetic time. Critical for the rung-cadence path —
+        // PendingReferralFollowUpConcern reads sent_at to compute
+        // hours-since-last-rung.
+        if (isset($body['as_of']) && is_string($body['as_of']) && $body['as_of'] !== '') {
+            $overrides['as_of'] = (string) $body['as_of'];
+        }
 
         return $this->service->sendOne($concernKey, $referenceType, $referenceId, $overrides);
     }
