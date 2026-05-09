@@ -647,7 +647,7 @@ class PatientOutreachService
      *
      * Returns null on no match.
      */
-    public function lookupByPhone(string $patientPhone, ?string $threadId = null): ?array
+    public function lookupByPhone(string $patientPhone, ?string $threadId = null, array $options = []): ?array
     {
         $threadId = $threadId !== null && trim($threadId) !== '' ? trim($threadId) : null;
         if ($threadId === null && trim($patientPhone) === '') {
@@ -660,6 +660,15 @@ class PatientOutreachService
 
         $row = null;
 
+        // SimClinic-aware: bind synthetic now as parameter so the
+        // "still-active" filter (expires_at IS NULL OR expires_at > ?)
+        // respects the same clock that stamped expires_at at send time.
+        // Without this, a synthetic-Day-8 inbound reply still matches
+        // against synthetic-Day-1 messages whose expires_at has rolled
+        // past in synthetic time but not real time. Threads naturally
+        // through outreach_lookup_by_phone($options).
+        $nowSql = $this->nowFromOptions($options)->format('Y-m-d H:i:s');
+
         // 1. Thread-id (strictly stronger than phone — unambiguous).
         if ($threadId !== null) {
             $row = sqlQuery(
@@ -667,9 +676,9 @@ class PatientOutreachService
                    FROM " . self::TABLE_MESSAGES . "
                   WHERE external_thread_id = ? AND resolution IS NULL
                     AND dispatch_status IN ('sent','dry_run')
-                    AND (expires_at IS NULL OR expires_at > NOW())
+                    AND (expires_at IS NULL OR expires_at > ?)
                ORDER BY sent_at DESC LIMIT 1",
-                [$threadId]
+                [$threadId, $nowSql]
             );
         }
 
@@ -680,9 +689,9 @@ class PatientOutreachService
                    FROM " . self::TABLE_MESSAGES . "
                   WHERE patient_phone = ? AND resolution IS NULL
                     AND dispatch_status IN ('sent','dry_run')
-                    AND (expires_at IS NULL OR expires_at > NOW())
+                    AND (expires_at IS NULL OR expires_at > ?)
                ORDER BY sent_at DESC LIMIT 1",
-                [$patientPhone]
+                [$patientPhone, $nowSql]
             );
         }
 
@@ -697,9 +706,9 @@ class PatientOutreachService
                       WHERE REGEXP_REPLACE(patient_phone, '[^0-9]', '') LIKE CONCAT('%', ?)
                         AND resolution IS NULL
                         AND dispatch_status IN ('sent','dry_run')
-                        AND (expires_at IS NULL OR expires_at > NOW())
+                        AND (expires_at IS NULL OR expires_at > ?)
                    ORDER BY sent_at DESC LIMIT 1",
-                    [$tail]
+                    [$tail, $nowSql]
                 );
             }
         }
@@ -882,9 +891,15 @@ class PatientOutreachService
      * detected via method_exists so existing concerns don't need to
      * implement a no-op stub.
      */
-    public function expirePending(int $limit = 200): array
+    public function expirePending(int $limit = 200, array $options = []): array
     {
-        $now = date('Y-m-d H:i:s');
+        // SimClinic-aware: nowFromOptions honors $options['as_of']; falls
+        // back to wall-clock for production. Without this, multi-day runs
+        // stamp expires_at synthetic (post-Phase-2 fix) but expirePending
+        // compares against real NOW() — synthetic-expired rows never get
+        // flipped, so the d+7 closure rung (PendingReferralFollowUp's
+        // onExpire 'lost' tail + its courtesy fax) silently never fires.
+        $now = $this->nowFromOptions($options)->format('Y-m-d H:i:s');
         $rows = sqlStatement(
             "SELECT id, uuid, concern_type, concern_subtype,
                     patient_id, patient_uuid, patient_phone, patient_email,

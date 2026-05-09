@@ -159,7 +159,13 @@ class OutreachController
     {
         $body = $this->readJsonBody();
         $limit = isset($body['limit']) ? max(1, (int) $body['limit']) : 200;
-        return $this->service->expirePending($limit);
+        // SimClinic-aware: as_of plumbs through so expire-check uses
+        // the synthetic clock that matched the sent_at/expires_at stamp.
+        $options = [];
+        if (isset($body['as_of']) && is_string($body['as_of']) && $body['as_of'] !== '') {
+            $options['as_of'] = (string) $body['as_of'];
+        }
+        return $this->service->expirePending($limit, $options);
     }
 
     // -------------------------------------------------------------------
@@ -298,7 +304,12 @@ class OutreachController
         if ($phone === '' && $threadId === '') {
             return $this->error('Either phone or thread_id query parameter is required', 400);
         }
-        $row = $this->service->lookupByPhone($phone, $threadId !== '' ? $threadId : null);
+        // SimClinic-aware: as_of plumbs through to the still-active
+        // filter (expires_at > $now) so synthetic-rolled-past rows
+        // don't match against late-arriving inbound replies.
+        $asOf = trim((string) ($_GET['as_of'] ?? ''));
+        $options = $asOf !== '' ? ['as_of' => $asOf] : [];
+        $row = $this->service->lookupByPhone($phone, $threadId !== '' ? $threadId : null, $options);
         if ($row === null) {
             return $this->error('No pending outreach message for this phone/thread', 404);
         }
